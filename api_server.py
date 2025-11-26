@@ -312,8 +312,17 @@ def list_strategies():
         {
         'name': 'pairs',
         'description': 'Pairs/Statistical Arbitrage',
-                'parameters': ['pairs_ticker1', 'pairs_ticker2', 'pairs_zscore_threshold']
-            }
+        'parameters': ['pairs_ticker1', 'pairs_ticker2', 'pairs_zscore_threshold']
+        },
+        {
+        'name': 'daytrade_options',
+        'description': 'Daytrade Options - CALLs ATM/OTM com momentum intraday',
+        'parameters': [
+            'min_intraday_return', 'min_volume_ratio', 'delta_min', 'delta_max',
+            'max_dte', 'max_spread_pct', 'min_option_volume', 'risk_per_trade',
+            'take_profit_pct', 'stop_loss_pct'
+        ]
+        }
         ]
     })
 
@@ -560,6 +569,81 @@ def get_metrics():
         return jsonify({
             'status': 'error',
             'message': str(e)
+        }), 500
+
+
+@app.route('/agents/health', methods=['GET'])
+def get_agents_health():
+    """Verifica saúde de todos os agentes."""
+    try:
+        from src.agent_health_checker import AgentHealthChecker
+    except ImportError:
+        try:
+            from agent_health_checker import AgentHealthChecker
+        except ImportError:
+            return jsonify({
+                'status': 'error',
+                'message': 'AgentHealthChecker não encontrado'
+            }), 500
+    
+    try:
+        # Inicializar logger se necessário
+        global logger
+        if logger is None:
+            logger = StructuredLogger(log_dir='logs')
+        
+        checker = AgentHealthChecker(CONFIG, logger)
+        health_summary = checker.get_health_summary()
+        
+        return jsonify({
+            'status': 'success',
+            **health_summary
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/agents/test', methods=['POST'])
+def test_agents():
+    """Executa testes dos agentes."""
+    try:
+        from src.agent_health_checker import AgentHealthChecker
+    except ImportError:
+        try:
+            from agent_health_checker import AgentHealthChecker
+        except ImportError:
+            return jsonify({
+                'status': 'error',
+                'message': 'AgentHealthChecker não encontrado'
+            }), 500
+    
+    try:
+        # Inicializar logger se necessário
+        global logger
+        if logger is None:
+            logger = StructuredLogger(log_dir='logs')
+        
+        checker = AgentHealthChecker(CONFIG, logger)
+        health_results = checker.check_all_agents()
+        
+        # Executar teste de atividade também
+        activity_results = checker.check_recent_activity(hours=24)
+        
+        return jsonify({
+            'status': 'success',
+            'health_check': health_results,
+            'activity_check': activity_results,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'traceback': traceback.format_exc()
         }), 500
 
 

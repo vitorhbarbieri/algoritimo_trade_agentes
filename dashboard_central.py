@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import requests
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 import plotly.graph_objects as go
@@ -110,6 +111,17 @@ def get_monitoring_status():
     """Obtém status do monitoramento."""
     try:
         response = requests.get(f"{BASE_URL}/monitoring/status", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
+@st.cache_data(ttl=10)
+def get_agents_health():
+    """Obtém status de saúde dos agentes."""
+    try:
+        response = requests.get(f"{BASE_URL}/agents/health", timeout=10)
         if response.status_code == 200:
             return response.json()
         return None
@@ -280,9 +292,10 @@ def main():
         return
     
     # Tabs principais
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Visão Geral",
         "🤖 Atividade dos Agentes",
+        "💚 Saúde dos Agentes",
         "💰 Portfólio",
         "📈 Backtest",
         "📋 Ações Monitoradas",
@@ -297,7 +310,7 @@ def main():
         metrics_data = get_metrics()
         activity_data = get_agents_activity()
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             if metrics_data and 'metrics' in metrics_data:
@@ -326,6 +339,19 @@ def main():
                 st.metric("Execuções", activity.get('executions', 0))
             else:
                 st.metric("Execuções", 0)
+        
+        with col5:
+            # Contar propostas de daytrade
+            if activity_data and 'activity' in activity_data:
+                activity = activity_data['activity']
+                if activity.get('recent_activity'):
+                    daytrade_count = sum(1 for a in activity['recent_activity'] 
+                                       if a.get('strategy') == 'daytrade_options')
+                    st.metric("Daytrade Options", daytrade_count)
+                else:
+                    st.metric("Daytrade Options", 0)
+            else:
+                st.metric("Daytrade Options", 0)
         
         st.divider()
         
@@ -385,7 +411,8 @@ def main():
         if activity_data and 'activity' in activity_data:
             activity = activity_data['activity']
             
-            col1, col2, col3 = st.columns(3)
+            # Métricas gerais
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 st.metric("Propostas do TraderAgent", activity.get('trader_proposals', 0))
@@ -396,41 +423,403 @@ def main():
             with col3:
                 st.metric("Execuções", activity.get('executions', 0))
             
+            with col4:
+                # Contar propostas por estratégia
+                if activity.get('recent_activity'):
+                    daytrade_count = sum(1 for a in activity['recent_activity'] 
+                                       if a.get('strategy') == 'daytrade_options')
+                    st.metric("Daytrade Options", daytrade_count)
+                else:
+                    st.metric("Daytrade Options", 0)
+            
             st.divider()
             
-            # Gráfico de atividade por tipo
+            # Seção específica para Daytrade Options
+            st.subheader("📈 Agente Daytrade Options")
+            
             if activity.get('recent_activity'):
                 df_activity = pd.DataFrame(activity['recent_activity'])
                 
-                # Contagem por tipo
+                # Filtrar atividades de daytrade
+                if 'strategy' in df_activity.columns:
+                    daytrade_activities = df_activity[df_activity['strategy'] == 'daytrade_options'].copy()
+                else:
+                    daytrade_activities = pd.DataFrame()
+                
+                if not daytrade_activities.empty:
+                    # Métricas específicas do daytrade
+                    col_dt1, col_dt2, col_dt3, col_dt4 = st.columns(4)
+                    
+                    with col_dt1:
+                        st.metric("Propostas Daytrade", len(daytrade_activities))
+                    
+                    with col_dt2:
+                        # Calcular taxa de aprovação
+                        daytrade_evaluations = [a for a in activity['recent_activity'] 
+                                              if a.get('strategy') == 'daytrade_options' 
+                                              and a.get('event_type') == 'risk_evaluation']
+                        approved = sum(1 for e in daytrade_evaluations if e.get('decision') == 'APPROVE')
+                        approval_rate = (approved / len(daytrade_evaluations) * 100) if daytrade_evaluations else 0
+                        st.metric("Taxa de Aprovação", f"{approval_rate:.1f}%")
+                    
+                    with col_dt3:
+                        # Média de momentum intraday
+                        momentums = []
+                        for act in daytrade_activities.to_dict('records'):
+                            if 'metadata' in act and isinstance(act['metadata'], dict):
+                                mom = act['metadata'].get('intraday_return', 0)
+                                if mom:
+                                    momentums.append(mom * 100)
+                        avg_momentum = np.mean(momentums) if momentums else 0
+                        st.metric("Momentum Médio", f"{avg_momentum:.2f}%")
+                    
+                    with col_dt4:
+                        # Média de volume ratio
+                        vol_ratios = []
+                        for act in daytrade_activities.to_dict('records'):
+                            if 'metadata' in act and isinstance(act['metadata'], dict):
+                                vr = act['metadata'].get('volume_ratio', 0)
+                                if vr:
+                                    vol_ratios.append(vr)
+                        avg_vol_ratio = np.mean(vol_ratios) if vol_ratios else 0
+                        st.metric("Volume Ratio Médio", f"{avg_vol_ratio:.2f}x")
+                    
+                    st.divider()
+                    
+                    # Gráficos específicos do daytrade
+                    col_chart1, col_chart2 = st.columns(2)
+                    
+                    with col_chart1:
+                        # Gráfico de momentum por proposta
+                        if momentums:
+                            fig_momentum = go.Figure()
+                            fig_momentum.add_trace(go.Bar(
+                                x=list(range(len(momentums))),
+                                y=momentums,
+                                marker_color='green',
+                                name='Momentum Intraday (%)'
+                            ))
+                            fig_momentum.update_layout(
+                                title="Momentum Intraday das Propostas",
+                                xaxis_title="Proposta",
+                                yaxis_title="Momentum (%)",
+                                height=300
+                            )
+                            st.plotly_chart(fig_momentum, use_container_width=True)
+                    
+                    with col_chart2:
+                        # Gráfico de volume ratio
+                        if vol_ratios:
+                            fig_vol = go.Figure()
+                            fig_vol.add_trace(go.Bar(
+                                x=list(range(len(vol_ratios))),
+                                y=vol_ratios,
+                                marker_color='blue',
+                                name='Volume Ratio'
+                            ))
+                            fig_vol.update_layout(
+                                title="Volume Ratio das Propostas",
+                                xaxis_title="Proposta",
+                                yaxis_title="Volume Ratio",
+                                height=300
+                            )
+                            st.plotly_chart(fig_vol, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    # Tabela detalhada de propostas de daytrade
+                    st.subheader("📊 Detalhes das Propostas Daytrade")
+                    
+                    # Preparar dados para tabela
+                    daytrade_table_data = []
+                    for act in daytrade_activities.to_dict('records'):
+                        metadata = act.get('metadata', {})
+                        row = {
+                            'Timestamp': act.get('timestamp', 'N/A')[:19] if len(str(act.get('timestamp', ''))) > 19 else act.get('timestamp', 'N/A'),
+                            'Proposal ID': act.get('proposal_id', 'N/A'),
+                            'Underlying': metadata.get('underlying', 'N/A'),
+                            'Strike': metadata.get('strike', 'N/A'),
+                            'Delta': f"{metadata.get('delta', 0):.3f}" if metadata.get('delta') else 'N/A',
+                            'Gamma': f"{metadata.get('gamma', 0):.6f}" if metadata.get('gamma') else 'N/A',
+                            'Momentum': f"{metadata.get('intraday_return', 0)*100:.2f}%" if metadata.get('intraday_return') else 'N/A',
+                            'Vol Ratio': f"{metadata.get('volume_ratio', 0):.2f}x" if metadata.get('volume_ratio') else 'N/A',
+                            'Spread %': f"{metadata.get('spread_pct', 0)*100:.2f}%" if metadata.get('spread_pct') else 'N/A',
+                            'Premium': f"${metadata.get('premium', 0):.2f}" if metadata.get('premium') else 'N/A',
+                            'DTE': metadata.get('days_to_expiry', 'N/A')
+                        }
+                        daytrade_table_data.append(row)
+                    
+                    if daytrade_table_data:
+                        df_daytrade = pd.DataFrame(daytrade_table_data)
+                        st.dataframe(df_daytrade, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Nenhum dado detalhado disponível nas propostas.")
+                else:
+                    st.info("⚠️ Nenhuma atividade de daytrade encontrada ainda. Execute um backtest ou inicie o monitoramento para ver atividades do agente de daytrade.")
+            
+            st.divider()
+            
+            # Seção para outros agentes (vol_arb e pairs)
+            st.subheader("🔄 Outros Agentes")
+            
+            if activity.get('recent_activity'):
+                df_activity = pd.DataFrame(activity['recent_activity'])
+                
+                # Contagem por estratégia
+                if 'strategy' in df_activity.columns:
+                    strategy_counts = df_activity[df_activity['strategy'].notna()]['strategy'].value_counts()
+                else:
+                    strategy_counts = pd.Series(dtype=int)
+                
+                if not strategy_counts.empty:
+                    fig_strategy = px.bar(
+                        x=strategy_counts.index,
+                        y=strategy_counts.values,
+                        title="Propostas por Estratégia",
+                        labels={'x': 'Estratégia', 'y': 'Quantidade'},
+                        color=strategy_counts.index,
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    st.plotly_chart(fig_strategy, use_container_width=True)
+                else:
+                    st.info("Nenhuma estratégia encontrada nas atividades recentes.")
+                
+                # Gráfico de atividade por tipo
                 event_counts = df_activity['event_type'].value_counts()
                 
-                fig = px.pie(
-                    values=event_counts.values,
-                    names=event_counts.index,
-                    title="Distribuição de Atividades",
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                if not event_counts.empty:
+                    fig = px.pie(
+                        values=event_counts.values,
+                        names=event_counts.index,
+                        title="Distribuição de Atividades",
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
                 
                 # Tabela de atividades recentes
-                st.subheader("📋 Atividades Recentes")
+                st.subheader("📋 Todas as Atividades Recentes")
                 # Selecionar colunas disponíveis
-                available_cols = ['timestamp', 'event_type']
-                for col in ['proposal_id', 'strategy', 'decision']:
+                available_cols = []
+                for col in ['timestamp', 'event_type', 'proposal_id', 'strategy', 'decision']:
                     if col in df_activity.columns:
                         available_cols.append(col)
                 
-                st.dataframe(
-                    df_activity[available_cols].head(20),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                if available_cols:
+                    st.dataframe(
+                        df_activity[available_cols].head(20),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("Nenhuma coluna disponível para exibir.")
         else:
             st.info("Nenhuma atividade disponível. Execute um backtest primeiro.")
     
-    # TAB 3: Portfólio
+    # TAB 3: Saúde dos Agentes
     with tab3:
+        st.header("💚 Status de Saúde dos Agentes")
+        
+        # Botão para executar teste
+        col_test1, col_test2 = st.columns([3, 1])
+        with col_test1:
+            st.info("🔍 Verifique o status de saúde de todos os agentes do sistema")
+        with col_test2:
+            if st.button("🔄 Executar Verificação", type="primary", use_container_width=True):
+                with st.spinner("Verificando saúde dos agentes..."):
+                    try:
+                        response = requests.post(f"{BASE_URL}/agents/test", timeout=30)
+                        if response.status_code == 200:
+                            st.success("✅ Verificação concluída!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Erro: {response.text}")
+                    except Exception as e:
+                        st.error(f"Erro ao executar verificação: {e}")
+        
+        st.divider()
+        
+        # Obter status de saúde
+        health_data = get_agents_health()
+        
+        if health_data and 'health_check' in health_data:
+            health_check = health_data['health_check']
+            
+            # Status geral
+            overall_status = health_check.get('overall_status', 'unknown')
+            col_status1, col_status2, col_status3 = st.columns(3)
+            
+            with col_status1:
+                if overall_status == 'healthy':
+                    st.success("✅ **SISTEMA SAUDÁVEL**")
+                    st.metric("Status Geral", "Operacional")
+                elif overall_status == 'degraded':
+                    st.warning("⚠️ **SISTEMA DEGRADADO**")
+                    st.metric("Status Geral", "Parcial")
+                else:
+                    st.error("❌ **SISTEMA COM PROBLEMAS**")
+                    st.metric("Status Geral", "Erro")
+            
+            with col_status2:
+                if health_data.get('last_check'):
+                    last_check = health_data['last_check']
+                    st.metric("Última Verificação", last_check[:19] if len(last_check) > 19 else last_check)
+                else:
+                    st.metric("Última Verificação", "Nunca")
+            
+            with col_status3:
+                if health_data.get('recent_activity'):
+                    activity = health_data['recent_activity']
+                    if activity.get('status') == 'ok':
+                        # Função auxiliar para converter valores para int
+                        def safe_int_sum(values_dict):
+                            total = 0
+                            for value in values_dict.values():
+                                if isinstance(value, int):
+                                    total += value
+                                elif isinstance(value, float):
+                                    total += int(value)
+                                elif isinstance(value, str):
+                                    try:
+                                        total += int(float(value))
+                                    except (ValueError, TypeError):
+                                        pass
+                            return total
+                        
+                        total_activities = safe_int_sum(activity.get('activities', {}))
+                        st.metric("Atividades (24h)", total_activities)
+                    else:
+                        st.metric("Atividades (24h)", "N/A")
+            
+            st.divider()
+            
+            # Status individual de cada agente
+            st.subheader("📋 Status Individual dos Agentes")
+            
+            agents = health_check.get('agents', {})
+            
+            for agent_name, agent_status in agents.items():
+                status = agent_status.get('status', 'unknown')
+                name = agent_status.get('name', agent_name)
+                message = agent_status.get('message', '')
+                
+                with st.expander(f"{'✅' if status == 'healthy' else '⚠️' if status == 'disabled' else '❌'} {name}", expanded=False):
+                    col_agent1, col_agent2 = st.columns(2)
+                    
+                    with col_agent1:
+                        if status == 'healthy':
+                            st.success(f"**Status:** Operacional")
+                        elif status == 'disabled':
+                            st.info(f"**Status:** Desabilitado")
+                        else:
+                            st.error(f"**Status:** Com Problemas")
+                        
+                        st.write(f"**Mensagem:** {message}")
+                        
+                        # Mostrar detalhes específicos
+                        if 'can_generate_proposals' in agent_status:
+                            st.write(f"**Gera Propostas:** {'Sim' if agent_status['can_generate_proposals'] else 'Não'}")
+                        if 'test_proposals_count' in agent_status:
+                            st.write(f"**Propostas de Teste:** {agent_status['test_proposals_count']}")
+                        if 'strategies_loaded' in agent_status:
+                            st.write(f"**Estratégias Carregadas:** {agent_status['strategies_loaded']}")
+                        if 'config_enabled' in agent_status:
+                            st.write(f"**Configuração:** {'Habilitada' if agent_status['config_enabled'] else 'Desabilitada'}")
+                    
+                    with col_agent2:
+                        if 'error' in agent_status:
+                            st.error(f"**Erro:** {agent_status['error']}")
+                        if 'threshold' in agent_status:
+                            st.write(f"**Threshold:** {agent_status['threshold']}")
+                        if 'ticker1' in agent_status:
+                            st.write(f"**Tickers:** {agent_status.get('ticker1', 'N/A')} / {agent_status.get('ticker2', 'N/A')}")
+                        if 'zscore_threshold' in agent_status:
+                            st.write(f"**Z-Score Threshold:** {agent_status['zscore_threshold']}")
+            
+            st.divider()
+            
+            # Atividade recente
+            st.subheader("📊 Atividade Recente (24 horas)")
+            
+            if health_data.get('recent_activity'):
+                activity = health_data['recent_activity']
+                
+                if activity.get('status') == 'ok':
+                    activities = activity.get('activities', {})
+                    
+                    col_act1, col_act2, col_act3, col_act4 = st.columns(4)
+                    
+                    # Função auxiliar para converter valores para int
+                    def safe_int(value, default=0):
+                        if isinstance(value, int):
+                            return value
+                        elif isinstance(value, float):
+                            return int(value)
+                        elif isinstance(value, str):
+                            try:
+                                return int(float(value))
+                            except (ValueError, TypeError):
+                                return default
+                        return default
+                    
+                    with col_act1:
+                        trader_proposals = safe_int(activities.get('trader_proposals', 0))
+                        st.metric("Propostas TraderAgent", trader_proposals)
+                    
+                    with col_act2:
+                        risk_evaluations = safe_int(activities.get('risk_evaluations', 0))
+                        st.metric("Avaliações RiskAgent", risk_evaluations)
+                    
+                    with col_act3:
+                        executions = safe_int(activities.get('executions', 0))
+                        st.metric("Execuções", executions)
+                    
+                    with col_act4:
+                        daytrade_proposals = safe_int(activities.get('daytrade_proposals', 0))
+                        st.metric("Daytrade Propostas", daytrade_proposals)
+                    
+                    st.divider()
+                    
+                    # Gráfico de atividades por estratégia
+                    strategy_activities = {
+                        'Daytrade Options': safe_int(activities.get('daytrade_proposals', 0)),
+                        'VolArb': safe_int(activities.get('vol_arb_proposals', 0)),
+                        'Pairs': safe_int(activities.get('pairs_proposals', 0))
+                    }
+                    
+                    if sum(strategy_activities.values()) > 0:
+                        fig_strategy_act = px.bar(
+                            x=list(strategy_activities.keys()),
+                            y=list(strategy_activities.values()),
+                            title="Atividades por Estratégia (24h)",
+                            labels={'x': 'Estratégia', 'y': 'Propostas'},
+                            color=list(strategy_activities.keys()),
+                            color_discrete_sequence=['#00cc00', '#1f77b4', '#ff7f0e']
+                        )
+                        st.plotly_chart(fig_strategy_act, use_container_width=True)
+                    
+                    if activities.get('last_activity'):
+                        st.info(f"⏰ **Última Atividade:** {activities['last_activity'][:19]}")
+                else:
+                    st.warning(f"⚠️ {activity.get('message', 'Erro ao verificar atividade')}")
+            else:
+                st.info("Nenhuma atividade recente encontrada.")
+        else:
+            st.warning("⚠️ Não foi possível obter status de saúde. Execute uma verificação primeiro.")
+            
+            if st.button("🔍 Executar Primeira Verificação", type="primary"):
+                with st.spinner("Verificando..."):
+                    try:
+                        response = requests.post(f"{BASE_URL}/agents/test", timeout=30)
+                        if response.status_code == 200:
+                            st.success("✅ Verificação concluída!")
+                            st.cache_data.clear()
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro: {e}")
+    
+    # TAB 4: Portfólio
+    with tab4:
         st.header("💰 Status do Portfólio")
         
         results = get_backtest_results()
@@ -482,8 +871,8 @@ def main():
         else:
             st.info("Nenhum dado de portfólio disponível. Execute um backtest primeiro.")
     
-    # TAB 4: Backtest
-    with tab4:
+    # TAB 5: Backtest
+    with tab5:
         st.header("📈 Backtest e Métricas")
         
         metrics_data = get_metrics()
@@ -532,8 +921,8 @@ def main():
         else:
             st.info("Nenhuma métrica disponível. Execute um backtest primeiro.")
     
-    # TAB 5: Ações Monitoradas
-    with tab5:
+    # TAB 6: Ações Monitoradas
+    with tab6:
         st.header("📋 Ações Monitoradas")
         st.info(f"Total de {len(TICKERS_MONITORADOS)} ações sendo monitoradas pelos agentes")
         
@@ -567,8 +956,8 @@ def main():
         O sistema monitora essas ações continuamente e gera propostas quando encontra oportunidades.
         """)
     
-    # TAB 6: Log de Monitoramento
-    with tab6:
+    # TAB 7: Log de Monitoramento
+    with tab7:
         st.header("📝 Log de Monitoramento em Tempo Real")
         
         # Status do monitoramento
@@ -632,20 +1021,26 @@ def main():
             - Threshold: Z-score > 2.0
             - Status: ✅ Ativo
             
-            **3. Spread Arbitrage** 💰
-            - Buscando: Spreads bid-ask anormais
-            - Threshold: > 0.5%
+            **3. Daytrade Options** 📈⚡
+            - Buscando: CALLs ATM/OTM com momentum intraday
+            - Threshold: Momentum ≥ 0.5% + Volume Ratio ≥ 0.25x
+            - Delta: 0.20 - 0.60 | DTE ≤ 7 dias
             - Status: ✅ Ativo
             """)
         
         with strategies_col2:
             st.markdown("""
-            **4. Momentum** 📈
+            **4. Spread Arbitrage** 💰
+            - Buscando: Spreads bid-ask anormais
+            - Threshold: > 0.5%
+            - Status: ✅ Ativo
+            
+            **5. Momentum** 📈
             - Buscando: Movimentos fortes + volume
             - Threshold: Momentum > 2% + volume spike > 1.5x
             - Status: ✅ Ativo
             
-            **5. Mean Reversion** 🔄
+            **6. Mean Reversion** 🔄
             - Buscando: Desvios extremos da média
             - Threshold: Z-score > 2.0
             - Status: ✅ Ativo

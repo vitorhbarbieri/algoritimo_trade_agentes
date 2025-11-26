@@ -16,7 +16,8 @@ try:
     from .crypto_api import create_crypto_api
     from .agents import TraderAgent
     from .utils import StructuredLogger
-    from .email_notifier import EmailNotifier
+    from .notifications import UnifiedNotifier
+    from .orders_repository import OrdersRepository
 except ImportError:
     from market_monitor import MarketMonitor
     from data_loader import DataLoader
@@ -24,7 +25,8 @@ except ImportError:
     from crypto_api import create_crypto_api
     from agents import TraderAgent
     from utils import StructuredLogger
-    from email_notifier import EmailNotifier
+    from notifications import UnifiedNotifier
+    from orders_repository import OrdersRepository
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,11 @@ class MonitoringService:
     def __init__(self, config: Dict):
         self.config = config
         self.logger = StructuredLogger(log_dir='logs')
+        self.orders_repo = OrdersRepository()  # Repositório para salvar ordens
         self.market_monitor = MarketMonitor(config)
-        self.trader_agent = TraderAgent(config, self.logger)
+        self.trader_agent = TraderAgent(config, self.logger, orders_repo=self.orders_repo)
         self.data_loader = DataLoader()
+        self.notifier = UnifiedNotifier(config)  # Sistema unificado de notificações
         self.is_running = False
         self.thread = None
         self.last_scan_time = None
@@ -101,12 +105,37 @@ class MonitoringService:
                 # Escanear oportunidades
                 opportunities = self.market_monitor.scan_all_opportunities(market_data)
                 
+                # Enviar notificações se encontrar oportunidades
+                if opportunities:
+                    # Notificar oportunidades encontradas
+                    for opp in opportunities[:5]:  # Limitar a 5 para não spammar
+                        self.notifier.notify_opportunity(opp)
+                
                 # Gerar propostas
                 if opportunities:
                     proposals = self.trader_agent.generate_proposals(
                         pd.to_datetime(datetime.now()),
                         market_data
                     )
+                    
+                    # Enviar notificações se houver propostas importantes
+                    if proposals:
+                        # Notificar sobre propostas de daytrade (alta prioridade)
+                        daytrade_proposals = [p for p in proposals if p.strategy == 'daytrade_options']
+                        if daytrade_proposals:
+                            for proposal in daytrade_proposals[:3]:  # Limitar a 3 para não spammar
+                                opportunity_data = {
+                                    'type': 'daytrade_options',
+                                    'symbol': proposal.symbol,
+                                    'ticker': proposal.metadata.get('underlying', 'N/A'),
+                                    'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
+                                    'proposal_id': proposal.proposal_id,
+                                    'strike': proposal.metadata.get('strike', 'N/A'),
+                                    'delta': proposal.metadata.get('delta', 0),
+                                    'intraday_return': proposal.metadata.get('intraday_return', 0),
+                                    'volume_ratio': proposal.metadata.get('volume_ratio', 0)
+                                }
+                                self.notifier.notify_opportunity(opportunity_data)
             
             # Buscar dados de cripto (se habilitado)
             if self.crypto_api:
@@ -117,6 +146,12 @@ class MonitoringService:
         
         except Exception as e:
             logger.error(f"Erro ao escanear mercado: {e}")
+            # Notificar erro
+            self.notifier.notify_error(
+                error_type='Market Scan Error',
+                error_message=str(e),
+                details={'timestamp': datetime.now().isoformat()}
+            )
         
         self.last_scan_time = datetime.now()
         self.opportunities_found = opportunities[:10]  # Últimas 10

@@ -16,9 +16,10 @@ except ImportError:
 class ExecutionSimulator:
     """Simula execução de ordens com slippage e comissões."""
     
-    def __init__(self, config: Dict, logger: Optional[StructuredLogger] = None):
+    def __init__(self, config: Dict, logger: Optional[StructuredLogger] = None, orders_repo=None):
         self.config = config
         self.logger = logger
+        self.orders_repo = orders_repo  # Repositório para salvar execuções
         self.commission_rate = config.get('commission_rate', 0.001)  # 0.1%
         self.slippage_bps = config.get('slippage_bps', 5)  # 5 bps
         self.fill_rate = config.get('fill_rate', 0.95)  # 95% fill rate
@@ -85,6 +86,29 @@ class ExecutionSimulator:
         
         if self.logger:
             self.logger.log_execution(order_id, 'FILLED', fill)
+        
+        # Salvar execução no banco de dados
+        if self.orders_repo:
+            try:
+                execution_dict = {
+                    'order_id': fill['fill_id'],
+                    'proposal_id': order.get('proposal_id', ''),
+                    'timestamp': fill['timestamp'].isoformat() if hasattr(fill['timestamp'], 'isoformat') else str(fill['timestamp']),
+                    'symbol': fill['symbol'],
+                    'side': fill['side'],
+                    'quantity': fill['quantity'],
+                    'price': fill['price'],
+                    'market_price': fill['market_price'],
+                    'slippage': fill['slippage'],
+                    'commission': fill['commission'],
+                    'notional': fill['notional'],
+                    'total_cost': fill['total_cost'],
+                    'status': 'FILLED'
+                }
+                self.orders_repo.save_execution(execution_dict)
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Erro ao salvar execução {order_id}: {e}")
         
         return fill
     

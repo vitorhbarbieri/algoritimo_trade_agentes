@@ -77,6 +77,40 @@
   "max_delta": 1000,
   "max_gamma": 500,
   "max_vega": 1000,
+  "daytrade_options": {
+    "enabled": true,
+    "min_intraday_return": 0.005,
+    "min_volume_ratio": 0.25,
+    "delta_min": 0.20,
+    "delta_max": 0.60,
+    "max_dte": 7,
+    "max_spread_pct": 0.05,
+    "min_option_volume": 200,
+    "risk_per_trade": 0.002,
+    "max_risk_per_trade": 5000,
+    "take_profit_pct": 0.10,
+    "stop_loss_pct": 0.40,
+    "max_options_exposure_pct": 0.15
+  },
+  "notifications": {
+    "telegram": {
+      "enabled": true,
+      "bot_token": "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM",
+      "chat_id": ""
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": ""
+    },
+    "email": {
+      "enabled": false,
+      "email_remetente": "",
+      "email_senha": "",
+      "email_destinatario": "vitorh.barbieri@gmail.com",
+      "email_smtp_server": "smtp.gmail.com",
+      "email_smtp_port": 587
+    }
+  },
   "email_notifications_enabled": true,
   "email_destinatario": "vitorh.barbieri@gmail.com",
   "email_remetente": "",
