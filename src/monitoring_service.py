@@ -18,6 +18,7 @@ try:
     from .utils import StructuredLogger
     from .notifications import UnifiedNotifier
     from .orders_repository import OrdersRepository
+    from .trading_schedule import TradingSchedule
 except ImportError:
     from market_monitor import MarketMonitor
     from data_loader import DataLoader
@@ -27,6 +28,7 @@ except ImportError:
     from utils import StructuredLogger
     from notifications import UnifiedNotifier
     from orders_repository import OrdersRepository
+    from trading_schedule import TradingSchedule
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +44,15 @@ class MonitoringService:
         self.trader_agent = TraderAgent(config, self.logger, orders_repo=self.orders_repo)
         self.data_loader = DataLoader()
         self.notifier = UnifiedNotifier(config)  # Sistema unificado de notificações
+        self.trading_schedule = TradingSchedule()  # Horário de funcionamento B3
         self.is_running = False
         self.thread = None
         self.last_scan_time = None
         self.opportunities_found = []
         self.proposals_generated = []
+        self.trading_started = False  # Flag para saber se já iniciou hoje
+        self.last_status_notification = None  # Última notificação de status (2h)
+        self.day_start_time = None  # Horário de início do dia
         
         # APIs
         self.stock_api = create_market_data_api('yfinance')
@@ -64,10 +70,148 @@ class MonitoringService:
         else:
             self.crypto_api = None
     
+    def _send_start_notification(self):
+        """Envia notificação de início das atividades."""
+        b3_time = self.trading_schedule.get_current_b3_time()
+        message = f"""
+🚀 *AGENTE DE DAYTRADE INICIADO*
+
+*Horário:* {b3_time.strftime('%d/%m/%Y %H:%M:%S')} (B3)
+*Status:* {'Pré-Mercado' if self.trading_schedule.is_pre_market() else 'Mercado Aberto'}
+
+O agente está agora monitorando o mercado e gerando propostas de daytrade.
+
+*Horário de funcionamento:*
+• Pré-mercado: 09:45 - 10:00
+• Trading: 10:00 - 17:00
+• Fechamento: 17:00
+
+Você receberá atualizações a cada 2 horas durante o pregão.
+"""
+        self.notifier.send(message, title="🚀 Agente Iniciado", priority='high')
+        self.day_start_time = b3_time
+    
+    def _send_end_notification(self):
+        """Envia notificação de fim das atividades."""
+        b3_time = self.trading_schedule.get_current_b3_time()
+        
+        # Buscar resumo do dia
+        if self.orders_repo:
+            summary = self.orders_repo.get_daily_summary(b3_time.strftime('%Y-%m-%d'))
+        else:
+            summary = {}
+        
+        runtime = ""
+        if self.day_start_time:
+            runtime_delta = b3_time - self.day_start_time
+            hours = runtime_delta.seconds // 3600
+            minutes = (runtime_delta.seconds % 3600) // 60
+            runtime = f"{hours}h {minutes}min"
+        
+        message = f"""
+🏁 *AGENTE DE DAYTRADE FINALIZADO*
+
+*Horário:* {b3_time.strftime('%d/%m/%Y %H:%M:%S')} (B3)
+*Tempo de operação:* {runtime if runtime else 'N/A'}
+
+*Resumo do Dia:*
+• Propostas geradas: {summary.get('total_proposals', 0)}
+• Propostas aprovadas: {summary.get('total_approved', 0)}
+• Propostas rejeitadas: {summary.get('total_rejected', 0)}
+• Execuções: {summary.get('total_executions', 0)}
+
+O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
+"""
+        self.notifier.send(message, title="🏁 Agente Finalizado", priority='normal')
+        self.trading_started = False
+        self.day_start_time = None
+    
+    def _send_status_notification(self):
+        """Envia notificação de status a cada 2 horas."""
+        b3_time = self.trading_schedule.get_current_b3_time()
+        
+        # Buscar estatísticas do dia
+        if self.orders_repo:
+            summary = self.orders_repo.get_daily_summary(b3_time.strftime('%Y-%m-%d'))
+            proposals = self.orders_repo.get_proposals(
+                start_date=f"{b3_time.strftime('%Y-%m-%d')} 00:00:00",
+                end_date=b3_time.isoformat()
+            )
+        else:
+            summary = {}
+            proposals = pd.DataFrame()
+        
+        # Estatísticas por estratégia
+        strategy_stats = {}
+        if not proposals.empty and 'strategy' in proposals.columns:
+            strategy_stats = proposals.groupby('strategy').size().to_dict()
+        
+        runtime = ""
+        if self.day_start_time:
+            runtime_delta = b3_time - self.day_start_time
+            hours = runtime_delta.seconds // 3600
+            minutes = (runtime_delta.seconds % 3600) // 60
+            runtime = f"{hours}h {minutes}min"
+        
+        message = f"""
+📊 *STATUS DO AGENTE - ATUALIZAÇÃO*
+
+*Horário:* {b3_time.strftime('%d/%m/%Y %H:%M:%S')} (B3)
+*Tempo de operação:* {runtime if runtime else 'N/A'}
+
+*Estatísticas do Dia:*
+• Total de propostas: {summary.get('total_proposals', 0)}
+• Aprovadas: {summary.get('total_approved', 0)}
+• Rejeitadas: {summary.get('total_rejected', 0)}
+• Modificadas: {summary.get('total_modified', 0)}
+• Execuções: {summary.get('total_executions', 0)}
+
+*Por Estratégia:*
+"""
+        for strategy, count in strategy_stats.items():
+            message += f"• {strategy.replace('_', ' ').title()}: {count}\n"
+        
+        message += f"\n*Próxima atualização:* Em 2 horas"
+        
+        self.notifier.send(message, title="📊 Status do Agente", priority='normal')
+        self.last_status_notification = b3_time
+    
     def scan_market(self) -> Dict:
         """Escaneia mercado uma vez."""
         opportunities = []
         proposals = []
+        
+        # Verificar horário B3
+        b3_time = self.trading_schedule.get_current_b3_time()
+        
+        # Verificar se deve iniciar trading
+        if not self.trading_started and self.trading_schedule.should_start_trading():
+            self.trading_started = True
+            self._send_start_notification()
+        
+        # Verificar se deve parar trading
+        if self.trading_started and self.trading_schedule.should_stop_trading():
+            self._send_end_notification()
+            return {
+                'timestamp': b3_time.isoformat(),
+                'status': 'MARKET_CLOSED',
+                'opportunities': 0,
+                'proposals': 0
+            }
+        
+        # Verificar se está no horário de trading
+        if not self.trading_schedule.is_trading_hours():
+            return {
+                'timestamp': b3_time.isoformat(),
+                'status': 'OUTSIDE_TRADING_HOURS',
+                'opportunities': 0,
+                'proposals': 0
+            }
+        
+        # Enviar notificação de status a cada 2 horas
+        if self.last_status_notification is None or \
+           (b3_time - self.last_status_notification).total_seconds() >= 7200:  # 2 horas
+            self._send_status_notification()
         
         try:
             # Buscar dados de ações
@@ -166,7 +310,7 @@ class MonitoringService:
         }
     
     def start_monitoring(self, interval_seconds: int = 300):
-        """Inicia monitoramento contínuo."""
+        """Inicia monitoramento contínuo respeitando horário B3."""
         if self.is_running:
             logger.warning("Monitoramento já está rodando")
             return
@@ -176,8 +320,27 @@ class MonitoringService:
         def monitor_loop():
             while self.is_running:
                 try:
+                    b3_time = self.trading_schedule.get_current_b3_time()
+                    status = self.trading_schedule.get_trading_status()
+                    
+                    # Se não for dia útil ou fora do horário, aguardar
+                    if status == 'CLOSED':
+                        # Aguardar até próximo dia útil
+                        next_open = self.trading_schedule.get_next_trading_open()
+                        if next_open:
+                            wait_seconds = (next_open - b3_time).total_seconds()
+                            logger.info(f"Mercado fechado. Próxima abertura: {next_open.strftime('%d/%m/%Y %H:%M')}")
+                            # Aguardar até próximo dia útil (máximo 1 hora para verificar novamente)
+                            time.sleep(min(wait_seconds, 3600))
+                        else:
+                            time.sleep(3600)  # Aguardar 1 hora
+                        continue
+                    
+                    # Escanear mercado
                     result = self.scan_market()
-                    logger.info(f"Scan completo: {result['opportunities']} oportunidades, {result['proposals']} propostas")
+                    logger.info(f"Scan completo ({status}): {result.get('opportunities', 0)} oportunidades, {result.get('proposals', 0)} propostas")
+                    
+                    # Intervalo entre scans
                     time.sleep(interval_seconds)
                 except Exception as e:
                     logger.error(f"Erro no loop de monitoramento: {e}")
@@ -185,7 +348,7 @@ class MonitoringService:
         
         self.thread = threading.Thread(target=monitor_loop, daemon=True)
         self.thread.start()
-        logger.info(f"Monitoramento iniciado (intervalo: {interval_seconds}s)")
+        logger.info(f"Monitoramento iniciado (intervalo: {interval_seconds}s, horário B3)")
     
     def stop_monitoring(self):
         """Para monitoramento."""

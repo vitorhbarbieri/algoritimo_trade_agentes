@@ -5,14 +5,46 @@ Script simples para obter Chat ID do Telegram.
 Envia uma mensagem de teste e mostra o Chat ID.
 """
 
+import os
 import requests
 import json
 from pathlib import Path
 
-TELEGRAM_BOT_TOKEN = "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM"
+# Obter token de variável de ambiente ou config.json
+def get_telegram_token():
+    """Obtém token do Telegram de variável de ambiente ou config.json."""
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    if token:
+        return token
+    
+    config_path = Path('config.json')
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                token = config.get('notifications', {}).get('telegram', {}).get('bot_token', '')
+                if token:
+                    return token
+        except:
+            pass
+    
+    print("⚠️  Token do Telegram não encontrado!")
+    print("   Configure via: export TELEGRAM_BOT_TOKEN='seu_token'")
+    return None
+
+TELEGRAM_BOT_TOKEN = get_telegram_token()
 
 def obter_chat_id():
     """Obtém o chat_id do Telegram."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("\n❌ Token do Telegram não configurado!")
+        print("\n📝 Configure o token:")
+        print("   1. Via variável de ambiente:")
+        print("      export TELEGRAM_BOT_TOKEN='seu_token_aqui'")
+        print("\n   2. Ou adicione no config.json:")
+        print('      "notifications": { "telegram": { "bot_token": "seu_token" } }')
+        return None
+    
     print("=" * 70)
     print("📱 OBTENDO CHAT ID DO TELEGRAM")
     print("=" * 70)
@@ -192,7 +224,7 @@ if __name__ == '__main__':
         print('   "notifications": {')
         print('     "telegram": {')
         print('       "enabled": true,')
-        print('       "bot_token": "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM",')
+        print('       "bot_token": "SEU_TOKEN_AQUI",')
         print('       "chat_id": "SEU_CHAT_ID_AQUI"')
         print('     }')
         print('   }')

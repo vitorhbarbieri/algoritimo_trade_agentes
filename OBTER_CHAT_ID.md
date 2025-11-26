@@ -1,8 +1,8 @@
 # 📱 Como Obter seu Chat ID do Telegram
 
-## ✅ Token Já Configurado
+## ⚙️ Configuração do Token
 
-O token do bot já está no sistema: `7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM`
+O token do bot deve ser configurado via **variável de ambiente** ou no `config.json` (não commitado).
 
 ## 🚀 Método Mais Fácil (2 minutos)
 
@@ -44,7 +44,7 @@ Se preferir configurar manualmente:
   "notifications": {
     "telegram": {
       "enabled": true,
-      "bot_token": "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM",
+      "bot_token": "SEU_TOKEN_AQUI",
       "chat_id": "SEU_CHAT_ID_AQUI"
     }
   }

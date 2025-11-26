@@ -66,4 +66,5 @@ data/*.json
 
 # Arquivos de configuração local
 config.local.json
+config.json
 

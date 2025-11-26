@@ -5,18 +5,50 @@ Configuração rápida do Telegram - permite entrada manual do Chat ID.
 """
 
 import json
+import os
 import requests
 from pathlib import Path
 
-TELEGRAM_BOT_TOKEN = "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM"
+# Obter token de variável de ambiente ou config.json
+def get_telegram_token():
+    """Obtém token do Telegram de variável de ambiente ou config.json."""
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    if token:
+        return token
+    
+    config_path = Path('config.json')
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                token = config.get('notifications', {}).get('telegram', {}).get('bot_token', '')
+                if token:
+                    return token
+        except:
+            pass
+    
+    print("⚠️  Token do Telegram não encontrado!")
+    print("   Configure via: export TELEGRAM_BOT_TOKEN='seu_token'")
+    return None
+
+TELEGRAM_BOT_TOKEN = get_telegram_token()
 
 def configurar_telegram():
     """Configura Telegram com entrada manual do Chat ID."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("\n❌ Token do Telegram não configurado!")
+        print("\n📝 Configure o token:")
+        print("   1. Via variável de ambiente:")
+        print("      export TELEGRAM_BOT_TOKEN='seu_token_aqui'")
+        print("\n   2. Ou adicione no config.json:")
+        print('      "notifications": { "telegram": { "bot_token": "seu_token" } }')
+        return False
+    
     print("=" * 70)
     print("📱 CONFIGURAÇÃO RÁPIDA DO TELEGRAM")
     print("=" * 70)
     
-    print(f"\n✅ Token do Bot já configurado: {TELEGRAM_BOT_TOKEN[:20]}...")
+    print(f"\n✅ Token do Bot configurado: {TELEGRAM_BOT_TOKEN[:20]}...")
     
     print("\n📝 Para obter seu Chat ID:")
     print("   Método 1 (Mais fácil):")

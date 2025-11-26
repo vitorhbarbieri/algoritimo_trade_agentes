@@ -1,8 +1,8 @@
 # 📱 Configuração Rápida do Telegram
 
-## ✅ Token já Configurado
+## ⚙️ Configuração do Token
 
-O token do bot já está configurado no sistema: `7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM`
+O token do bot deve ser configurado via **variável de ambiente** ou no `config.json` (não commitado).
 
 ## 🚀 Passo a Passo (2 minutos)
 
@@ -47,7 +47,7 @@ Se preferir configurar manualmente, edite `config.json`:
   "notifications": {
     "telegram": {
       "enabled": true,
-      "bot_token": "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM",
+      "bot_token": "SEU_TOKEN_AQUI",
       "chat_id": "SEU_CHAT_ID_AQUI"
     }
   }
