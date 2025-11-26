@@ -1,0 +1,69 @@
+# Arquivos de ambiente e chaves de API
+.env
+.env.local
+.env.*.local
+*.env
+!*.env.example
+
+# Banco de dados SQLite
+*.db
+*.sqlite
+*.sqlite3
+trades.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.jsonl
+
+# Arquivos de dados temporários
+*.csv
+output/
+data/*.csv
+data/*.json
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Arquivos de configuração local
+config.local.json
+
