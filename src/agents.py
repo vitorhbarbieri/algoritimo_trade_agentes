@@ -118,7 +118,17 @@ class DayTradeOptionsStrategy:
         spot_data = market_data.get('spot', {})
         options_data = market_data.get('options', {})
         
-        if not spot_data or not options_data:
+        if not spot_data:
+            if self.logger:
+                self.logger.log_error("DayTradeOptionsStrategy: Nenhum dado spot disponível")
+            return proposals
+        
+        # Se não houver opções, tentar buscar para cada ativo com momentum
+        if not options_data:
+            if self.logger:
+                self.logger.log_error("DayTradeOptionsStrategy: Nenhum dado de opções disponível")
+            # Continuar mesmo sem opções - pode gerar propostas baseadas apenas em momentum
+            # Mas não vamos gerar propostas sem opções
             return proposals
         
         # Iterar sobre ativos disponíveis

@@ -199,87 +199,170 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                 'proposals': 0
             }
         
-        # Verificar se está no horário de trading
-        if not self.trading_schedule.is_trading_hours():
+        # Verificar se está no horário de trading (inclui pré-mercado)
+        trading_status = self.trading_schedule.get_trading_status()
+        if trading_status == 'CLOSED':
             return {
                 'timestamp': b3_time.isoformat(),
-                'status': 'OUTSIDE_TRADING_HOURS',
+                'status': 'MARKET_CLOSED',
                 'opportunities': 0,
                 'proposals': 0
             }
         
-        # Enviar notificação de status a cada 2 horas
-        if self.last_status_notification is None or \
-           (b3_time - self.last_status_notification).total_seconds() >= 7200:  # 2 horas
+        # Enviar notificação de status a cada 2 horas (apenas durante trading)
+        if trading_status == 'TRADING' and (self.last_status_notification is None or \
+           (b3_time - self.last_status_notification).total_seconds() >= 7200):  # 2 horas
             self._send_status_notification()
         
         try:
-            # Buscar dados de ações
+            # Buscar dados de ações (INTRADAY do dia atual)
             tickers = self.config.get('monitored_tickers', [])
-            if tickers:
-                end_date = datetime.now().strftime('%Y-%m-%d')
-                start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            if not tickers:
+                logger.warning("Nenhum ticker configurado para monitoramento")
+                return {
+                    'timestamp': b3_time.isoformat(),
+                    'status': 'NO_TICKERS',
+                    'opportunities': 0,
+                    'proposals': 0
+                }
+            
+            # Buscar dados INTRADAY do dia atual (não histórico!)
+            today = datetime.now().strftime('%Y-%m-%d')
+            market_data = {'spot': {}, 'options': {}}
+            
+            logger.info(f"Buscando dados intraday para {len(tickers)} tickers...")
+            
+            # Importar yfinance uma vez
+            try:
+                import yfinance as yf
+            except ImportError:
+                logger.error("yfinance não instalado! Execute: pip install yfinance")
+                raise
+            
+            # Buscar dados spot INTRADAY para cada ticker
+            tickers_to_process = tickers[:20]  # Limitar a 20 para não demorar muito
+            successful_tickers = 0
+            
+            for ticker in tickers_to_process:
+                try:
+                    ticker_yf = ticker
+                    stock = yf.Ticker(ticker_yf)
+                    
+                    # Buscar dados intraday do dia atual
+                    hist_intraday = None
+                    try:
+                        # Tentar dados intraday (5m) - mais confiável que 1m
+                        hist_intraday = stock.history(period='1d', interval='5m', timeout=10)
+                    except:
+                        try:
+                            # Fallback: tentar 15m
+                            hist_intraday = stock.history(period='1d', interval='15m', timeout=10)
+                        except:
+                            try:
+                                # Fallback: tentar 1h
+                                hist_intraday = stock.history(period='1d', interval='1h', timeout=10)
+                            except:
+                                # Último fallback: dados diários dos últimos 5 dias
+                                hist_intraday = stock.history(period='5d', interval='1d', timeout=10)
+                    
+                    if hist_intraday is None or hist_intraday.empty:
+                        logger.debug(f"Nenhum dado encontrado para {ticker}")
+                        continue
+                    
+                    # Pegar dados mais recentes
+                    latest = hist_intraday.iloc[-1]
+                    
+                    # Determinar preço de abertura do dia
+                    # Se tiver múltiplos períodos, pegar o primeiro do dia
+                    if len(hist_intraday) > 1:
+                        # Pegar o primeiro registro (mais antigo)
+                        first_of_day = hist_intraday.iloc[0]
+                        open_price = float(first_of_day['Open'])
+                        
+                        # Calcular volume total do dia (soma de todos os períodos)
+                        volume_today = int(hist_intraday['Volume'].sum()) if 'Volume' in hist_intraday.columns else 0
+                    else:
+                        # Se só tiver um registro, usar ele
+                        open_price = float(latest['Open'])
+                        volume_today = int(latest['Volume']) if not pd.isna(latest['Volume']) else 0
+                    
+                    current_price = float(latest['Close'])
+                    
+                    market_data['spot'][ticker] = {
+                        'open': open_price,
+                        'close': current_price,
+                        'last': current_price,  # Preço atual
+                        'high': float(latest['High']),
+                        'low': float(latest['Low']),
+                        'volume': volume_today,
+                        'adv': 0  # Será calculado depois se necessário
+                    }
+                    
+                    successful_tickers += 1
+                    
+                    # Buscar opções para este ticker (apenas se tiver dados spot)
+                    try:
+                        options_df = self.stock_api.fetch_options_chain(ticker, today, today)
+                        if not options_df.empty:
+                            if ticker not in market_data['options']:
+                                market_data['options'][ticker] = []
+                            market_data['options'][ticker].extend(options_df.to_dict('records'))
+                            logger.debug(f"Opções encontradas para {ticker}: {len(options_df)}")
+                    except Exception as opt_err:
+                        logger.debug(f"Erro ao buscar opções para {ticker}: {opt_err}")
+                        # Continuar mesmo sem opções - pode ter propostas baseadas apenas em momentum
+                    
+                except Exception as e:
+                    logger.warning(f"Erro ao buscar dados para {ticker}: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    continue
+            
+            logger.info(f"Dados coletados: {successful_tickers}/{len(tickers_to_process)} tickers com dados spot")
+            logger.info(f"Opções disponíveis para: {len(market_data.get('options', {}))} tickers")
+            
+            # CRÍTICO: Gerar propostas SEMPRE que houver dados, não apenas se MarketMonitor encontrar oportunidades
+            # O DayTradeOptionsStrategy analisa os dados diretamente
+            proposals = []
+            if market_data['spot']:
+                # Gerar propostas do TraderAgent (inclui DayTradeOptionsStrategy)
+                proposals = self.trader_agent.generate_proposals(
+                    pd.to_datetime(datetime.now()),
+                    market_data
+                )
                 
-                # Buscar dados spot
-                spot_df = self.stock_api.fetch_spot_data(tickers[:10], start_date, end_date)  # Limitar para não demorar
+                logger.info(f"Propostas geradas: {len(proposals)}")
                 
-                # Buscar opções (apenas para primeiro ticker)
-                if tickers:
-                    options_df = self.stock_api.fetch_options_chain(tickers[0], start_date, end_date)
-                else:
-                    options_df = pd.DataFrame()
-                
-                # Preparar market_data
-                market_data = {'spot': {}, 'options': {}}
-                
-                if not spot_df.empty:
-                    for ticker in spot_df['ticker'].unique():
-                        ticker_data = spot_df[spot_df['ticker'] == ticker].iloc[-1]
-                        market_data['spot'][ticker] = {
-                            'close': ticker_data['close'],
-                            'open': ticker_data['open'],
-                            'high': ticker_data['high'],
-                            'low': ticker_data['low'],
-                            'volume': ticker_data['volume']
-                        }
-                
-                if not options_df.empty:
-                    market_data['options'] = {tickers[0]: options_df.to_dict('records')}
-                
-                # Escanear oportunidades
+                # Escanear oportunidades do MarketMonitor (para outras estratégias)
                 opportunities = self.market_monitor.scan_all_opportunities(market_data)
                 
                 # Enviar notificações se encontrar oportunidades
                 if opportunities:
-                    # Notificar oportunidades encontradas
-                    for opp in opportunities[:5]:  # Limitar a 5 para não spammar
+                    for opp in opportunities[:5]:
                         self.notifier.notify_opportunity(opp)
                 
-                # Gerar propostas
-                if opportunities:
-                    proposals = self.trader_agent.generate_proposals(
-                        pd.to_datetime(datetime.now()),
-                        market_data
-                    )
-                    
-                    # Enviar notificações se houver propostas importantes
-                    if proposals:
-                        # Notificar sobre propostas de daytrade (alta prioridade)
-                        daytrade_proposals = [p for p in proposals if p.strategy == 'daytrade_options']
-                        if daytrade_proposals:
-                            for proposal in daytrade_proposals[:3]:  # Limitar a 3 para não spammar
-                                opportunity_data = {
-                                    'type': 'daytrade_options',
-                                    'symbol': proposal.symbol,
-                                    'ticker': proposal.metadata.get('underlying', 'N/A'),
-                                    'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
-                                    'proposal_id': proposal.proposal_id,
-                                    'strike': proposal.metadata.get('strike', 'N/A'),
-                                    'delta': proposal.metadata.get('delta', 0),
-                                    'intraday_return': proposal.metadata.get('intraday_return', 0),
-                                    'volume_ratio': proposal.metadata.get('volume_ratio', 0)
-                                }
-                                self.notifier.notify_opportunity(opportunity_data)
+                # Enviar notificações de propostas importantes
+                if proposals:
+                    # Notificar sobre propostas de daytrade (alta prioridade)
+                    daytrade_proposals = [p for p in proposals if p.strategy == 'daytrade_options']
+                    if daytrade_proposals:
+                        logger.info(f"Propostas de daytrade encontradas: {len(daytrade_proposals)}")
+                        for proposal in daytrade_proposals[:5]:  # Limitar a 5
+                            opportunity_data = {
+                                'type': 'daytrade_options',
+                                'symbol': proposal.symbol,
+                                'ticker': proposal.metadata.get('underlying', 'N/A'),
+                                'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
+                                'proposal_id': proposal.proposal_id,
+                                'strike': proposal.metadata.get('strike', 'N/A'),
+                                'delta': proposal.metadata.get('delta', 0),
+                                'intraday_return': proposal.metadata.get('intraday_return', 0),
+                                'volume_ratio': proposal.metadata.get('volume_ratio', 0)
+                            }
+                            self.notifier.notify_opportunity(opportunity_data)
+            else:
+                opportunities = []
+                logger.warning("Nenhum dado spot coletado")
             
             # Buscar dados de cripto (se habilitado)
             if self.crypto_api:
@@ -298,14 +381,21 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
             )
         
         self.last_scan_time = datetime.now()
-        self.opportunities_found = opportunities[:10]  # Últimas 10
+        self.opportunities_found = opportunities[:10] if 'opportunities' in locals() else []
         self.proposals_generated = proposals
+        
+        # Log detalhado para debug
+        logger.info(f"Scan completo - Propostas: {len(proposals)}, Oportunidades: {len(opportunities) if 'opportunities' in locals() else 0}")
+        if proposals:
+            for p in proposals[:3]:
+                logger.info(f"  Proposta: {p.strategy} - {p.symbol} - Qty: {p.quantity}")
         
         return {
             'timestamp': self.last_scan_time.isoformat(),
-            'opportunities': len(opportunities),
+            'status': trading_status,
+            'opportunities': len(opportunities) if 'opportunities' in locals() else 0,
             'proposals': len(proposals),
-            'opportunities_list': opportunities[:5],  # Top 5
+            'opportunities_list': opportunities[:5] if 'opportunities' in locals() else [],
             'proposals_list': [{'id': p.proposal_id, 'strategy': p.strategy, 'symbol': p.symbol} for p in proposals[:5]]
         }
     
@@ -338,7 +428,12 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                     
                     # Escanear mercado
                     result = self.scan_market()
-                    logger.info(f"Scan completo ({status}): {result.get('opportunities', 0)} oportunidades, {result.get('proposals', 0)} propostas")
+                    status_msg = result.get('status', 'UNKNOWN')
+                    logger.info(f"Scan completo ({status_msg}): {result.get('opportunities', 0)} oportunidades, {result.get('proposals', 0)} propostas")
+                    
+                    # Log detalhado se houver propostas
+                    if result.get('proposals', 0) > 0:
+                        logger.info(f"  Propostas geradas: {[p['strategy'] for p in result.get('proposals_list', [])]}")
                     
                     # Intervalo entre scans
                     time.sleep(interval_seconds)
