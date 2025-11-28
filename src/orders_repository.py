@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     quantity REAL NOT NULL,
     price REAL NOT NULL,
     order_type TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
     metadata TEXT,  -- JSON com metadados
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS risk_evaluations (
     details TEXT,  -- JSON com detalhes
     modified_quantity REAL,
     modified_price REAL,
+    source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
 );
@@ -71,6 +73,7 @@ CREATE TABLE IF NOT EXISTS executions (
     notional REAL,
     total_cost REAL,
     status TEXT NOT NULL CHECK (status IN ('FILLED', 'PARTIAL', 'REJECTED', 'CANCELLED')),
+    source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
 );
@@ -98,6 +101,30 @@ CREATE TABLE IF NOT EXISTS performance_snapshots (
     details TEXT,  -- JSON com detalhes adicionais
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Tabela para armazenar dados de mercado capturados (rastreabilidade)
+CREATE TABLE IF NOT EXISTS market_data_captures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    data_type TEXT NOT NULL CHECK (data_type IN ('spot', 'options', 'futures')),
+    open_price REAL,
+    high_price REAL,
+    low_price REAL,
+    close_price REAL,
+    last_price REAL,
+    volume INTEGER,
+    adv REAL,  -- Average Daily Volume
+    intraday_return REAL,
+    volume_ratio REAL,
+    options_data TEXT,  -- JSON com dados de opções se data_type='options'
+    raw_data TEXT,  -- JSON com dados brutos completos
+    source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_market_data_ticker ON market_data_captures (ticker);
+CREATE INDEX IF NOT EXISTS idx_market_data_timestamp ON market_data_captures (timestamp);
+CREATE INDEX IF NOT EXISTS idx_market_data_type ON market_data_captures (data_type);
 CREATE INDEX IF NOT EXISTS idx_perf_snapshots_timestamp ON performance_snapshots (timestamp);
 
 -- Tabela de posições abertas
@@ -115,10 +142,25 @@ CREATE TABLE IF NOT EXISTS open_positions (
     opened_at TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     closed_at TEXT,
+    source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
     UNIQUE(symbol, side, opened_at)
 );
 CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions (symbol);
 CREATE INDEX IF NOT EXISTS idx_open_positions_opened_at ON open_positions (opened_at);
+
+-- Tabela de aprovações de propostas via Telegram
+CREATE TABLE IF NOT EXISTS proposal_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('APPROVE', 'CANCEL')),
+    timestamp TEXT NOT NULL,
+    telegram_chat_id TEXT,
+    telegram_message_id INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_approvals_proposal_id ON proposal_approvals (proposal_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_approvals_timestamp ON proposal_approvals (timestamp);
 """
 
 
@@ -162,8 +204,8 @@ class OrdersRepository:
                 cursor.execute("""
                     INSERT OR REPLACE INTO proposals 
                     (proposal_id, timestamp, strategy, instrument_type, symbol, 
-                     side, quantity, price, order_type, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     side, quantity, price, order_type, metadata, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     proposal.get('proposal_id'),
                     proposal.get('timestamp', datetime.now().isoformat()),
@@ -174,7 +216,8 @@ class OrdersRepository:
                     proposal.get('quantity', 0),
                     proposal.get('price', 0),
                     proposal.get('order_type', 'LIMIT'),
-                    json.dumps(proposal.get('metadata', {}))
+                    json.dumps(proposal.get('metadata', {})),
+                    proposal.get('source', 'real')  # 'simulation' ou 'real'
                 ))
                 return True
         except Exception as e:
@@ -189,8 +232,8 @@ class OrdersRepository:
                 cursor.execute("""
                     INSERT INTO risk_evaluations 
                     (proposal_id, timestamp, decision, reason, details, 
-                     modified_quantity, modified_price)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     modified_quantity, modified_price, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     evaluation.get('proposal_id'),
                     evaluation.get('timestamp', datetime.now().isoformat()),
@@ -198,7 +241,8 @@ class OrdersRepository:
                     evaluation.get('reason', ''),
                     json.dumps(evaluation.get('details', {})),
                     evaluation.get('modified_quantity'),
-                    evaluation.get('modified_price')
+                    evaluation.get('modified_price'),
+                    evaluation.get('source', 'real')  # 'simulation' ou 'real'
                 ))
                 return True
         except Exception as e:
@@ -214,8 +258,8 @@ class OrdersRepository:
                     INSERT OR REPLACE INTO executions 
                     (order_id, proposal_id, timestamp, symbol, side, quantity, 
                      price, market_price, slippage, commission, notional, 
-                     total_cost, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     total_cost, status, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     execution.get('order_id') or execution.get('fill_id'),
                     execution.get('proposal_id', ''),
@@ -229,7 +273,8 @@ class OrdersRepository:
                     execution.get('commission', 0),
                     execution.get('notional', 0),
                     execution.get('total_cost', 0),
-                    execution.get('status', 'FILLED')
+                    execution.get('status', 'FILLED'),
+                    execution.get('source', 'real')  # 'simulation' ou 'real'
                 ))
                 return True
         except Exception as e:
@@ -371,6 +416,153 @@ class OrdersRepository:
                 return df
         except Exception as e:
             logger.error(f"Erro ao buscar snapshots: {e}")
+            return pd.DataFrame()
+    
+    def save_market_data_capture(self, ticker: str, data_type: str, spot_data: Dict = None, options_data: List[Dict] = None, raw_data: Dict = None, source: str = 'real'):
+        """Salva dados de mercado capturados para rastreabilidade."""
+        try:
+            timestamp = datetime.now().isoformat()
+            
+            # Preparar dados
+            open_price = spot_data.get('open') if spot_data else None
+            high_price = spot_data.get('high') if spot_data else None
+            low_price = spot_data.get('low') if spot_data else None
+            close_price = spot_data.get('close') if spot_data else None
+            last_price = spot_data.get('last') if spot_data else None
+            volume = spot_data.get('volume') if spot_data else None
+            adv = spot_data.get('adv') if spot_data else None
+            intraday_return = spot_data.get('intraday_return') if spot_data else None
+            volume_ratio = spot_data.get('volume_ratio') if spot_data else None
+            
+            # Converter Timestamps e outros objetos não serializáveis para strings
+            def json_serializer(obj):
+                """Serializador customizado para objetos não JSON nativos."""
+                if isinstance(obj, (pd.Timestamp, datetime)):
+                    return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+                elif isinstance(obj, pd.Series):
+                    return obj.to_dict()
+                elif isinstance(obj, pd.DataFrame):
+                    return obj.to_dict('records')
+                elif hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                raise TypeError(f"Type {type(obj)} not serializable")
+            
+            try:
+                options_json = json.dumps(options_data, default=json_serializer) if options_data else None
+            except Exception as e:
+                logger.warning(f"Erro ao serializar options_data: {e}")
+                options_json = None
+            
+            try:
+                raw_json = json.dumps(raw_data, default=json_serializer) if raw_data else None
+            except Exception as e:
+                logger.warning(f"Erro ao serializar raw_data: {e}")
+                raw_json = None
+            
+            with _connect() as conn:
+                conn.execute("""
+                    INSERT INTO market_data_captures 
+                    (timestamp, ticker, data_type, open_price, high_price, low_price, close_price, 
+                     last_price, volume, adv, intraday_return, volume_ratio, options_data, raw_data, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    timestamp, ticker, data_type, open_price, high_price, low_price, close_price,
+                    last_price, volume, adv, intraday_return, volume_ratio, options_json, raw_json, source
+                ))
+        except Exception as e:
+            logger.error(f"Erro ao salvar captura de dados de mercado: {e}")
+    
+    def get_market_data_captures(self, ticker: str = None, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Busca dados de mercado capturados."""
+        try:
+            with _connect() as conn:
+                query = "SELECT * FROM market_data_captures WHERE 1=1"
+                params = []
+                
+                if ticker:
+                    query += " AND ticker = ?"
+                    params.append(ticker)
+                
+                if start_date:
+                    query += " AND timestamp >= ?"
+                    params.append(start_date)
+                
+                if end_date:
+                    query += " AND timestamp <= ?"
+                    params.append(end_date)
+                
+                query += " ORDER BY timestamp DESC"
+                
+                df = pd.read_sql_query(query, conn, params=params)
+                
+                # Parse JSON fields
+                if 'options_data' in df.columns:
+                    df['options_data'] = df['options_data'].apply(lambda x: json.loads(x) if x else None)
+                if 'raw_data' in df.columns:
+                    df['raw_data'] = df['raw_data'].apply(lambda x: json.loads(x) if x else None)
+                
+                return df
+        except Exception as e:
+            logger.error(f"Erro ao buscar capturas de dados de mercado: {e}")
+            return pd.DataFrame()
+    
+    def save_open_position(self, symbol: str, side: str, quantity: float, avg_price: float, 
+                          current_price: float = None, delta: float = 0, gamma: float = 0, 
+                          vega: float = 0, unrealized_pnl: float = 0):
+        """Salva ou atualiza posição aberta."""
+        try:
+            timestamp = datetime.now().isoformat()
+            
+            # Calcular PnL não realizado se não fornecido
+            if unrealized_pnl == 0 and current_price:
+                if side == 'BUY':
+                    unrealized_pnl = (current_price - avg_price) * quantity
+                else:
+                    unrealized_pnl = (avg_price - current_price) * quantity
+            
+            with _connect() as conn:
+                # Verificar se já existe posição aberta
+                cursor = conn.execute("""
+                    SELECT id, quantity, avg_price FROM open_positions 
+                    WHERE symbol = ? AND side = ? AND closed_at IS NULL
+                """, (symbol, side))
+                
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Atualizar posição existente (média ponderada)
+                    old_qty = existing['quantity']
+                    old_avg = existing['avg_price']
+                    new_qty = old_qty + quantity
+                    new_avg = ((old_qty * old_avg) + (quantity * avg_price)) / new_qty if new_qty > 0 else avg_price
+                    
+                    conn.execute("""
+                        UPDATE open_positions 
+                        SET quantity = ?, avg_price = ?, current_price = ?, 
+                            unrealized_pnl = ?, delta = ?, gamma = ?, vega = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (new_qty, new_avg, current_price, unrealized_pnl, delta, gamma, vega, timestamp, existing['id']))
+                else:
+                    # Criar nova posição
+                    conn.execute("""
+                        INSERT INTO open_positions 
+                        (symbol, side, quantity, avg_price, current_price, unrealized_pnl, 
+                         delta, gamma, vega, opened_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (symbol, side, quantity, avg_price, current_price, unrealized_pnl, 
+                          delta, gamma, vega, timestamp))
+        except Exception as e:
+            logger.error(f"Erro ao salvar posição aberta: {e}")
+    
+    def get_open_positions(self) -> pd.DataFrame:
+        """Busca posições abertas."""
+        try:
+            with _connect() as conn:
+                query = "SELECT * FROM open_positions WHERE closed_at IS NULL ORDER BY opened_at DESC"
+                return pd.read_sql_query(query, conn)
+        except Exception as e:
+            logger.error(f"Erro ao buscar posições abertas: {e}")
             return pd.DataFrame()
     
     def get_daily_summary(self, date: str = None) -> Dict:

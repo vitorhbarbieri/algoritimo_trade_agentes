@@ -1,60 +1,64 @@
-# 📱 Configuração Rápida do Telegram
+# Configuração Rápida do Telegram
 
-## ⚙️ Configuração do Token
+## Problema Identificado
+O Telegram não está configurado. O `bot_token` e `chat_id` estão vazios no `config.json`.
 
-O token do bot deve ser configurado via **variável de ambiente** ou no `config.json` (não commitado).
+## Solução Rápida
 
-## 🚀 Passo a Passo (2 minutos)
+### Opção 1: Configurar no config.json (Recomendado)
 
-### 1. Obter seu Chat ID
-
-**Opção A: Via @userinfobot (Mais Fácil)**
-1. Abra o Telegram
-2. Procure por **@userinfobot**
-3. Envie `/start`
-4. Ele retornará seu Chat ID (um número como `123456789`)
-5. **Copie esse número**
-
-**Opção B: Enviar mensagem para seu bot**
-1. Procure pelo seu bot no Telegram (o que você criou com @BotFather)
-2. Envie qualquer mensagem (ex: `/start` ou `Olá`)
-3. Execute: `python obter_chat_id_telegram.py`
-
-### 2. Configurar
-
-Execute o script de configuração rápida:
-
-```bash
-python configurar_telegram_rapido.py
-```
-
-Quando pedir, digite seu Chat ID.
-
-### 3. Testar
-
-```bash
-python testar_notificacoes.py
-```
-
-Você deve receber uma mensagem no Telegram! ✅
-
-## 📱 Configuração Manual (Alternativa)
-
-Se preferir configurar manualmente, edite `config.json`:
+1. Abra o arquivo `config.json`
+2. Localize a seção `notifications.telegram`
+3. Preencha os campos:
 
 ```json
-{
-  "notifications": {
-    "telegram": {
-      "enabled": true,
-      "bot_token": "SEU_TOKEN_AQUI",
-      "chat_id": "SEU_CHAT_ID_AQUI"
-    }
+"notifications": {
+  "telegram": {
+    "enabled": true,
+    "bot_token": "SEU_TOKEN_AQUI",
+    "chat_id": "SEU_CHAT_ID_AQUI"
   }
 }
 ```
 
-## ✅ Pronto!
+### Opção 2: Usar Variáveis de Ambiente
 
-Com o Telegram configurado, você receberá notificações instantâneas no celular quando os agentes encontrarem oportunidades ou ocorrerem eventos importantes!
+No PowerShell:
+```powershell
+$env:TELEGRAM_BOT_TOKEN = "SEU_TOKEN_AQUI"
+$env:TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
+```
 
+## Como Obter o Token e Chat ID
+
+### Token do Bot:
+1. Abra o Telegram
+2. Procure por `@BotFather`
+3. Envie `/newbot` e siga as instruções
+4. Copie o token fornecido
+
+### Chat ID:
+1. Envie uma mensagem para seu bot
+2. Execute: `python obter_chat_id_telegram.py`
+3. Ou use: `https://api.telegram.org/bot<SEU_TOKEN>/getUpdates`
+4. Procure o `chat.id` na resposta
+
+## Testar Configuração
+
+Após configurar, execute:
+```bash
+python testar_telegram.py
+```
+
+Este script vai:
+- Verificar se o token e chat_id estão configurados
+- Testar o envio de uma mensagem de teste
+- Mostrar erros se houver problemas
+
+## Token Fornecido Anteriormente
+
+Você forneceu este token anteriormente:
+- Token: `7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM`
+- Telefone: `+5511996204459`
+
+**IMPORTANTE**: Por segurança, este token foi removido do código. Você precisa configurá-lo novamente no `config.json` ou via variáveis de ambiente.

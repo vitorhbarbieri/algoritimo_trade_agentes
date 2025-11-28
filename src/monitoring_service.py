@@ -321,6 +321,22 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
             logger.info(f"Dados coletados: {successful_tickers}/{len(tickers_to_process)} tickers com dados spot")
             logger.info(f"Opções disponíveis para: {len(market_data.get('options', {}))} tickers")
             
+            # Salvar dados capturados no banco para rastreabilidade
+            if self.orders_repo and market_data.get('spot'):
+                for ticker, spot_info in market_data['spot'].items():
+                    try:
+                        options_list = market_data.get('options', {}).get(ticker, [])
+                        self.orders_repo.save_market_data_capture(
+                            ticker=ticker,
+                            data_type='spot',
+                            spot_data=spot_info,
+                            options_data=options_list if options_list else None,
+                            raw_data={'timestamp': b3_time.isoformat()},
+                            source='real'
+                        )
+                    except Exception as save_err:
+                        logger.debug(f"Erro ao salvar dados de mercado para {ticker}: {save_err}")
+            
             # CRÍTICO: Gerar propostas SEMPRE que houver dados, não apenas se MarketMonitor encontrar oportunidades
             # O DayTradeOptionsStrategy analisa os dados diretamente
             proposals = []
@@ -341,25 +357,49 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                     for opp in opportunities[:5]:
                         self.notifier.notify_opportunity(opp)
                 
-                # Enviar notificações de propostas importantes
+                # Enviar notificações de propostas importantes com botões de aprovação
                 if proposals:
                     # Notificar sobre propostas de daytrade (alta prioridade)
                     daytrade_proposals = [p for p in proposals if p.strategy == 'daytrade_options']
                     if daytrade_proposals:
                         logger.info(f"Propostas de daytrade encontradas: {len(daytrade_proposals)}")
                         for proposal in daytrade_proposals[:5]:  # Limitar a 5
-                            opportunity_data = {
-                                'type': 'daytrade_options',
-                                'symbol': proposal.symbol,
-                                'ticker': proposal.metadata.get('underlying', 'N/A'),
-                                'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
+                            # Preparar dados da proposta para Telegram
+                            # Todas as informações já estão no metadata após padronização
+                            proposal_data = {
                                 'proposal_id': proposal.proposal_id,
-                                'strike': proposal.metadata.get('strike', 'N/A'),
-                                'delta': proposal.metadata.get('delta', 0),
-                                'intraday_return': proposal.metadata.get('intraday_return', 0),
-                                'volume_ratio': proposal.metadata.get('volume_ratio', 0)
+                                'symbol': proposal.symbol,
+                                'side': proposal.side,
+                                'quantity': proposal.quantity,
+                                'price': proposal.price,
+                                'metadata': proposal.metadata
                             }
-                            self.notifier.notify_opportunity(opportunity_data)
+                            
+                            # Enviar via Telegram com botões de aprovação
+                            telegram_channel = None
+                            for channel_name, channel in self.notifier.channels:
+                                if channel_name == 'telegram' and hasattr(channel, 'send_proposal_with_approval'):
+                                    telegram_channel = channel
+                                    break
+                            
+                            if telegram_channel:
+                                telegram_channel.send_proposal_with_approval(proposal_data)
+                            else:
+                                # Fallback: enviar notificação normal
+                                opportunity_data = {
+                                    'type': 'daytrade_options',
+                                    'symbol': proposal.symbol,
+                                    'ticker': proposal.metadata.get('underlying', 'N/A'),
+                                    'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
+                                    'proposal_id': proposal.proposal_id,
+                                    'strike': proposal.metadata.get('strike', 'N/A'),
+                                    'delta': proposal.metadata.get('delta', 0),
+                                    'intraday_return': proposal.metadata.get('intraday_return', 0),
+                                    'volume_ratio': proposal.metadata.get('volume_ratio', 0),
+                                    'expected_gain': expected_gain,
+                                    'expected_gain_pct': expected_gain_pct
+                                }
+                                self.notifier.notify_opportunity(opportunity_data)
             else:
                 opportunities = []
                 logger.warning("Nenhum dado spot coletado")

@@ -1,0 +1,6 @@
+[MASTER]
+init-hook='import sys; sys.path.insert(0, "src")'
+
+[TYPECHECK]
+ignored-modules=pricing,agents,orders_repository,notifications,utils,market_data_api,data_loader,market_monitor,crypto_api,execution,backtest,backtest_parallel,monitoring_service,trading_schedule,agent_health_checker,email_notifier
+

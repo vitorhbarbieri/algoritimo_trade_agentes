@@ -70,10 +70,10 @@ class TelegramNotifier(NotificationChannel):
             response = requests.post(url, json=payload, timeout=10)
             
             if response.status_code == 200:
-                logger.info("✅ Notificação Telegram enviada")
+                logger.info("Notificacao Telegram enviada")
                 return True
             else:
-                logger.error(f"❌ Erro Telegram: {response.status_code} - {response.text}")
+                logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
@@ -82,12 +82,16 @@ class TelegramNotifier(NotificationChannel):
     
     def send_opportunity(self, opportunity: Dict):
         """Envia notificação de oportunidade formatada."""
+        if not self.is_configured():
+            logger.warning("Telegram nao configurado - mensagem nao enviada")
+            return False
+        
         opp_type = opportunity.get('type', 'unknown')
         symbol = opportunity.get('symbol') or opportunity.get('ticker', 'N/A')
         score = opportunity.get('opportunity_score', 0)
         
         message = f"""
-*🎯 Nova Oportunidade*
+*Nova Oportunidade*
 
 *Tipo:* {opp_type.replace('_', ' ').title()}
 *Ativo:* `{symbol}`
@@ -109,6 +113,218 @@ class TelegramNotifier(NotificationChannel):
         message += f"\n_Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}_"
         
         return self.send(message, title="Oportunidade de Trading", priority='high')
+    
+    def send_proposal_with_approval(self, proposal: Dict) -> bool:
+        """
+        Envia proposta de ordem com botões de aprovação/cancelamento.
+        
+        Args:
+            proposal: Dicionário com dados da proposta incluindo:
+                - proposal_id: ID único da proposta
+                - symbol: Símbolo do ativo
+                - side: BUY ou SELL
+                - quantity: Quantidade
+                - price: Preço
+                - expected_gain: Ganho esperado (R$)
+                - expected_gain_pct: Ganho esperado (%)
+                - max_loss: Perda máxima (R$)
+                - metadata: Metadados adicionais
+        """
+        if not self.is_configured():
+            logger.warning("Telegram nao configurado - mensagem nao enviada")
+            return False
+        
+        try:
+            proposal_id = proposal.get('proposal_id', 'UNKNOWN')
+            symbol = proposal.get('symbol', 'N/A')
+            side = proposal.get('side', 'BUY')
+            quantity = proposal.get('quantity', 0)
+            metadata = proposal.get('metadata', {})
+            
+            # Extrair informações do metadata
+            entry_price_unit = metadata.get('entry_price', proposal.get('price', 0))
+            entry_price_total = metadata.get('entry_price_total', 0)
+            if entry_price_total == 0:
+                # Calcular se não estiver no metadata
+                # Ajustar multiplicador baseado no tipo de instrumento
+                multiplier = 100 if metadata.get('comparison_type') == 'options' else 1
+                entry_price_total = entry_price_unit * quantity * multiplier
+            
+            exit_price_tp_unit = metadata.get('exit_price_tp', 0)
+            exit_price_tp_total = metadata.get('exit_price_tp_total', 0)
+            if exit_price_tp_total == 0 and exit_price_tp_unit > 0:
+                exit_price_tp_total = exit_price_tp_unit * quantity * 100
+            
+            exit_price_sl_unit = metadata.get('exit_price_sl', 0)
+            exit_price_sl_total = metadata.get('exit_price_sl_total', 0)
+            if exit_price_sl_total == 0 and exit_price_sl_unit > 0:
+                exit_price_sl_total = exit_price_sl_unit * quantity * 100
+            
+            ticket_value = metadata.get('ticket_value', 1000.0)  # Padronizado R$ 1000
+            take_profit_pct = metadata.get('take_profit_pct', 0.10)
+            stop_loss_pct = metadata.get('stop_loss_pct', 0.40)
+            gain_value = metadata.get('gain_value', ticket_value * take_profit_pct)
+            loss_value = metadata.get('loss_value', ticket_value * stop_loss_pct)
+            underlying = metadata.get('underlying', 'N/A')
+            strike = metadata.get('strike', 0)
+            delta = metadata.get('delta', 0)
+            eod_close = metadata.get('eod_close', True)
+            
+            # Se não tiver preços de saída calculados, calcular agora
+            if exit_price_tp_unit == 0:
+                exit_price_tp_unit = entry_price_unit * (1 + take_profit_pct)
+                # Ajustar multiplicador baseado no tipo de instrumento
+                multiplier = 100 if metadata.get('comparison_type') == 'options' else 1
+                exit_price_tp_total = exit_price_tp_unit * quantity * multiplier
+            
+            if exit_price_sl_unit == 0:
+                exit_price_sl_unit = entry_price_unit * (1 - stop_loss_pct)
+                # Ajustar multiplicador baseado no tipo de instrumento
+                multiplier = 100 if metadata.get('comparison_type') == 'options' else 1
+                exit_price_sl_total = exit_price_sl_unit * quantity * multiplier
+            
+            # Determinar tipo de instrumento
+            instrument_type = metadata.get('comparison_type', 'options')
+            instrument_label = 'Opção' if instrument_type == 'options' else 'Ação'
+            comparison_score = metadata.get('comparison_score', 0)
+            
+            # Formatar mensagem rica e detalhada
+            message = f"""
+*📊 NOVA PROPOSTA DE ORDEM - DAYTRADE*
+
+*Proposta ID:* `{proposal_id}`
+*Tipo:* {instrument_label}
+*Ativo:* `{symbol}`
+*Ativo Base:* {underlying}
+*Operação:* {side}
+*Quantidade:* {quantity:.0f} {'contratos' if instrument_type == 'options' else 'ações'}
+
+*⭐ SCORE DE PRIORIZAÇÃO:* {comparison_score:.2f}
+
+*💵 VALOR DA OPERAÇÃO:*
+• Ticket Padronizado: R$ {ticket_value:,.2f}
+
+*📈 PREÇOS:*
+• Preço de Entrada: R$ {entry_price_unit:.2f} (Total: R$ {entry_price_total:,.2f})
+• Preço de Saída (TP): R$ {exit_price_tp_unit:.2f} (Total: R$ {exit_price_tp_total:,.2f})
+• Preço de Saída (SL): R$ {exit_price_sl_unit:.2f} (Total: R$ {exit_price_sl_total:,.2f})
+
+*💰 GANHO E PERDA (Ticket R$ {ticket_value:,.2f}):*
+• Ganho Esperado: R$ {gain_value:,.2f} ({take_profit_pct*100:.1f}%)
+• Perda Máxima: R$ {loss_value:,.2f} ({stop_loss_pct*100:.1f}%)
+
+*🎯 GATILHOS DE SAÍDA:*
+• Take Profit: {take_profit_pct*100:.1f}% → R$ {exit_price_tp_unit:.2f} (Total: R$ {exit_price_tp_total:,.2f})
+• Stop Loss: {stop_loss_pct*100:.1f}% → R$ {exit_price_sl_unit:.2f} (Total: R$ {exit_price_sl_total:,.2f})
+• Fechamento EOD: {'SIM' if eod_close else 'NÃO'} (fechamento automático no fim do dia)
+
+*📊 DETALHES TÉCNICOS:*
+"""
+            
+            # Adicionar detalhes técnicos
+            if instrument_type == 'options':
+                if strike > 0:
+                    message += f"• Strike: R$ {strike:.2f}\n"
+                if delta > 0:
+                    message += f"• Delta: {delta:.3f}\n"
+                if 'gamma' in metadata:
+                    message += f"• Gamma: {metadata['gamma']:.4f}\n"
+                if 'vega' in metadata:
+                    message += f"• Vega: {metadata['vega']:.4f}\n"
+                if 'iv' in metadata:
+                    message += f"• IV: {metadata['iv']*100:.1f}%\n"
+                if 'days_to_expiry' in metadata:
+                    message += f"• DTE: {metadata['days_to_expiry']} dias\n"
+            
+            # Detalhes comuns
+            if 'intraday_return' in metadata:
+                message += f"• Momentum Intraday: {metadata['intraday_return']*100:.2f}%\n"
+            if 'volume_ratio' in metadata:
+                message += f"• Volume Ratio: {metadata['volume_ratio']:.2f}x\n"
+            
+            # Informação de comparação
+            if comparison_score > 0:
+                message += f"\n*🔍 ANÁLISE COMPARATIVA:*\n"
+                message += f"• Score: {comparison_score:.2f} (maior = melhor)\n"
+                if instrument_type == 'options':
+                    message += f"• Escolhida: Opção (melhor que ação direta)\n"
+                else:
+                    message += f"• Escolhida: Ação (melhor que opção)\n"
+            
+            message += f"""
+*✅ APROVAÇÃO:*
+Para aprovar: Responda SIM ou digite `/aprovar {proposal_id}`
+Para cancelar: Responda NAO ou digite `/cancelar {proposal_id}`
+"""
+            
+            message += f"\n_Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}_"
+            
+            # Criar botões inline
+            keyboard = {
+                'inline_keyboard': [
+                    [
+                        {'text': '✅ APROVAR', 'callback_data': f'approve_{proposal_id}'},
+                        {'text': '❌ CANCELAR', 'callback_data': f'cancel_{proposal_id}'}
+                    ]
+                ]
+            }
+            
+            # Enviar mensagem com botões
+            url = f"{self.api_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'Markdown',
+                'reply_markup': json.dumps(keyboard),
+                'disable_web_page_preview': True
+            }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Proposta enviada com botões: {proposal_id}")
+                return True
+            else:
+                logger.error(f"Erro ao enviar proposta: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erro ao enviar proposta com aprovação: {e}")
+            return False
+    
+    def answer_callback_query(self, callback_query_id: str, text: str = None, show_alert: bool = False) -> bool:
+        """Responde a uma callback query do Telegram."""
+        try:
+            url = f"{self.api_url}/answerCallbackQuery"
+            payload = {
+                'callback_query_id': callback_query_id,
+                'text': text,
+                'show_alert': show_alert
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Erro ao responder callback: {e}")
+            return False
+    
+    def edit_message_reply_markup(self, chat_id: str, message_id: int, new_text: str = None) -> bool:
+        """Atualiza mensagem após aprovação/cancelamento."""
+        try:
+            url = f"{self.api_url}/editMessageText"
+            payload = {
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'text': new_text,
+                'parse_mode': 'Markdown'
+            }
+            if new_text:
+                payload['text'] = new_text
+            
+            response = requests.post(url, json=payload, timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Erro ao editar mensagem: {e}")
+            return False
     
     def send_error(self, error_type: str, error_message: str):
         """Envia notificação de erro."""
@@ -287,20 +503,36 @@ class UnifiedNotifier:
     
     def notify_opportunity(self, opportunity: Dict):
         """Notifica oportunidade encontrada."""
+        if not self.channels:
+            logger.warning("Nenhum canal de notificacao configurado! Mensagem nao enviada.")
+            return False
+        
+        results = []
         for channel_name, channel in self.channels:
             try:
                 if hasattr(channel, 'send_opportunity'):
-                    channel.send_opportunity(opportunity)
+                    result = channel.send_opportunity(opportunity)
+                    results.append(result)
+                    logger.info(f"Notificacao enviada via {channel_name}: {result}")
                 elif hasattr(channel, 'notify_opportunity_found'):
-                    channel.notify_opportunity_found(opportunity)
+                    result = channel.notify_opportunity_found(opportunity)
+                    results.append(result)
+                    logger.info(f"Notificacao enviada via {channel_name}: {result}")
                 else:
                     # Fallback genérico
                     opp_type = opportunity.get('type', 'unknown')
                     symbol = opportunity.get('symbol') or opportunity.get('ticker', 'N/A')
                     message = f"Nova oportunidade: {opp_type} - {symbol}"
-                    channel.send(message, title="Oportunidade", priority='high')
+                    result = channel.send(message, title="Oportunidade", priority='high')
+                    results.append(result)
+                    logger.info(f"Notificacao enviada via {channel_name}: {result}")
             except Exception as e:
                 logger.error(f"Erro ao notificar oportunidade via {channel_name}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                results.append(False)
+        
+        return any(results)
     
     def notify_error(self, error_type: str, error_message: str, details: Dict = None):
         """Notifica erro."""

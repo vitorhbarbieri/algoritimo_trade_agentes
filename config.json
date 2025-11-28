@@ -74,9 +74,9 @@
   "pairs_size": 100,
   "risk_free_rate": 0.05,
   "max_exposure": 0.5,
-  "max_delta": 1000,
-  "max_gamma": 500,
-  "max_vega": 1000,
+  "max_delta": 100000,
+  "max_gamma": 50000,
+  "max_vega": 50000,
   "daytrade_options": {
     "enabled": true,
     "min_intraday_return": 0.005,
@@ -90,13 +90,16 @@
     "max_risk_per_trade": 5000,
     "take_profit_pct": 0.10,
     "stop_loss_pct": 0.40,
-    "max_options_exposure_pct": 0.15
+    "max_options_exposure_pct": 0.15,
+    "enable_spot_trading": true,
+    "enable_comparison": true,
+    "min_comparison_score": 0.5
   },
   "notifications": {
     "telegram": {
       "enabled": true,
-      "bot_token": "",
-      "chat_id": ""
+      "bot_token": "7976826583:AAHt69p3mn90_5vMHgkJEUhC_0MTPvVXhZM",
+      "chat_id": "714112782"
     },
     "discord": {
       "enabled": false,

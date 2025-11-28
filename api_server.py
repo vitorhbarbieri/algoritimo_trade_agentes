@@ -54,13 +54,17 @@ except ImportError as e:
 app = Flask(__name__)
 CORS(app)  # Permitir CORS para acesso do frontend
 
-# Carregar configuraÃ§Ã£o
+# Configurar logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Carregar configuração
 with open('config.json', 'r') as f:
     CONFIG = json.load(f)
 
-# InstÃ¢ncias globais (serÃ£o inicializadas)
+# Instâncias globais (serão inicializadas)
 data_loader = None
-logger = None
 monitoring_service = None
 
 # Importar MonitoringService
@@ -81,15 +85,16 @@ def index():
         'message': 'API do Sistema de Trading com Agentes',
         'version': '1.0.0',
         'endpoints': {
-            '/': 'InformaÃ§Ãµes da API',
-            '/health': 'Status de saÃºde',
+            '/': 'Informações da API',
+            '/health': 'Status de saúde',
             '/backtest/run': 'Executar backtest',
             '/backtest/parallel': 'Executar backtest paralelo',
-            '/backtest/results': 'Ver resultados do Ãºltimo backtest',
-            '/metrics': 'Ver mÃ©tricas',
+            '/backtest/results': 'Ver resultados do último backtest',
+            '/metrics': 'Ver métricas',
             '/data/fetch': 'Buscar dados reais de mercado',
-            '/strategies/list': 'Listar estratÃ©gias disponÃ­veis',
-            '/test/pricing': 'Testar precificaÃ§Ã£o Black-Scholes'
+            '/strategies/list': 'Listar estratégias disponíveis',
+            '/test/pricing': 'Testar precificação Black-Scholes',
+            '/telegram/webhook': 'Webhook para receber callbacks do Telegram'
         }
     })
 
@@ -498,38 +503,106 @@ def manual_scan():
 
 @app.route('/agents/activity', methods=['GET'])
 def get_agents_activity():
-    """Retorna atividade dos agentes."""
+    """Retorna atividade dos agentes (logs + banco de dados)."""
     try:
         from pathlib import Path
         import json
         
+        # Buscar do banco de dados primeiro
+        try:
+            from src.orders_repository import OrdersRepository
+            orders_repo = OrdersRepository()
+            
+            # Buscar propostas recentes (últimas 24 horas)
+            from datetime import datetime, timedelta
+            start_date = (datetime.now() - timedelta(days=1)).isoformat()
+            proposals_db = orders_repo.get_proposals(start_date=start_date)
+            risk_evaluations_db = orders_repo.get_risk_evaluations(start_date=start_date)
+            executions_db = orders_repo.get_executions(start_date=start_date)
+            
+            # Converter propostas para formato de atividade
+            recent_activity_db = []
+            
+            # Adicionar propostas
+            for _, prop in proposals_db.iterrows():
+                # Garantir que metadata seja um dict válido
+                metadata = prop.get('metadata', {})
+                if isinstance(metadata, str):
+                    try:
+                        import json
+                        metadata = json.loads(metadata) if metadata else {}
+                    except:
+                        metadata = {}
+                elif not isinstance(metadata, dict):
+                    metadata = {}
+                
+                recent_activity_db.append({
+                    'event_type': 'trader_proposal',
+                    'timestamp': str(prop.get('timestamp', '')),
+                    'strategy': str(prop.get('strategy', '')),
+                    'symbol': str(prop.get('symbol', '')),
+                    'proposal_id': str(prop.get('proposal_id', '')),
+                    'quantity': float(prop.get('quantity', 0)) if prop.get('quantity') is not None else 0,
+                    'price': float(prop.get('price', 0)) if prop.get('price') is not None else 0,
+                    'side': str(prop.get('side', 'BUY')),
+                    'metadata': metadata
+                })
+            
+            # Adicionar avaliações de risco
+            for _, eval_row in risk_evaluations_db.iterrows():
+                recent_activity_db.append({
+                    'event_type': 'risk_evaluation',
+                    'timestamp': str(eval_row.get('timestamp', '')),
+                    'proposal_id': str(eval_row.get('proposal_id', '')),
+                    'decision': str(eval_row.get('decision', '')),
+                    'reason': str(eval_row.get('reason', '')),
+                    'strategy': 'daytrade_options'  # Adicionar strategy para filtros
+                })
+            
+            # Adicionar execuções
+            for _, exec_row in executions_db.iterrows():
+                recent_activity_db.append({
+                    'event_type': 'execution',
+                    'timestamp': str(exec_row.get('timestamp', '')),
+                    'proposal_id': str(exec_row.get('proposal_id', '')),
+                    'symbol': str(exec_row.get('symbol', '')),
+                    'quantity': float(exec_row.get('quantity', 0)) if exec_row.get('quantity') is not None else 0,
+                    'price': float(exec_row.get('price', 0)) if exec_row.get('price') is not None else 0,
+                    'side': str(exec_row.get('side', 'BUY')),
+                    'status': str(exec_row.get('status', 'FILLED'))
+                })
+            
+        except Exception as db_err:
+            print(f"⚠️ Erro ao buscar do banco: {db_err}")
+            recent_activity_db = []
+            proposals_db = pd.DataFrame()
+            risk_evaluations_db = pd.DataFrame()
+            executions_db = pd.DataFrame()
+        
+        # Buscar dos logs também
         log_dir = Path('logs')
-        if not log_dir.exists():
-            return jsonify({
-                'status': 'success',
-                'activity': {
-                    'trader_proposals': 0,
-                    'risk_evaluations': 0,
-                    'executions': 0,
-                    'recent_activity': []
-                }
-            })
-        
         logs = []
-        for log_file in log_dir.glob("*.jsonl"):
-            try:
-                with open(log_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip():
-                            logs.append(json.loads(line))
-            except:
-                continue
+        if log_dir.exists():
+            for log_file in log_dir.glob("*.jsonl"):
+                try:
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip():
+                                logs.append(json.loads(line))
+                except:
+                    continue
         
-        logs = sorted(logs, key=lambda x: x.get('timestamp', ''), reverse=True)
+        # Combinar atividades (banco + logs)
+        all_activities = recent_activity_db + logs
+        all_activities = sorted(all_activities, key=lambda x: x.get('timestamp', ''), reverse=True)
         
-        trader_proposals = [l for l in logs if l.get('event_type') == 'trader_proposal']
-        risk_evaluations = [l for l in logs if l.get('event_type') == 'risk_evaluation']
-        executions = [l for l in logs if l.get('event_type') == 'execution']
+        # Contar por tipo
+        trader_proposals = [a for a in all_activities if a.get('event_type') == 'trader_proposal']
+        risk_evaluations = [a for a in all_activities if a.get('event_type') == 'risk_evaluation']
+        executions = [a for a in all_activities if a.get('event_type') == 'execution']
+        
+        # Contar propostas por estratégia
+        daytrade_proposals = [p for p in trader_proposals if p.get('strategy') == 'daytrade_options']
         
         return jsonify({
             'status': 'success',
@@ -537,10 +610,13 @@ def get_agents_activity():
                 'trader_proposals': len(trader_proposals),
                 'risk_evaluations': len(risk_evaluations),
                 'executions': len(executions),
-                'recent_activity': logs[:20]  # Ãšltimas 20 atividades
+                'daytrade_proposals': len(daytrade_proposals),
+                'recent_activity': all_activities[:50]  # Últimas 50 atividades
             }
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'status': 'error',
             'message': str(e)
@@ -647,6 +723,152 @@ def test_agents():
         }), 500
 
 
+@app.route('/telegram/webhook', methods=['POST'])
+def telegram_webhook():
+    """Endpoint para receber callbacks do Telegram (botões de aprovação)."""
+    try:
+        data = request.get_json()
+        
+        # Verificar se é uma callback query (botão pressionado)
+        if 'callback_query' in data:
+            callback_query = data['callback_query']
+            callback_id = callback_query.get('id')
+            callback_data = callback_query.get('data', '')
+            message = callback_query.get('message', {})
+            chat_id = message.get('chat', {}).get('id')
+            message_id = message.get('message_id')
+            
+            # Processar callback_data (formato: approve_<proposal_id> ou cancel_<proposal_id>)
+            if callback_data.startswith('approve_'):
+                proposal_id = callback_data.replace('approve_', '')
+                action = 'APPROVE'
+            elif callback_data.startswith('cancel_'):
+                proposal_id = callback_data.replace('cancel_', '')
+                action = 'CANCEL'
+            else:
+                return jsonify({'ok': False, 'error': 'Invalid callback data'}), 400
+            
+            # Buscar proposta no banco de dados
+            try:
+                from src.orders_repository import OrdersRepository
+                repo = OrdersRepository()
+                
+                # Buscar proposta
+                import sqlite3
+                conn = sqlite3.connect('agents_orders.db')
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,))
+                proposal_row = cursor.fetchone()
+                conn.close()
+                
+                if not proposal_row:
+                    # Responder ao Telegram
+                    from src.notifications import UnifiedNotifier
+                    notifier = UnifiedNotifier(CONFIG)
+                    telegram_channel = None
+                    for channel_name, channel in notifier.channels:
+                        if channel_name == 'telegram':
+                            telegram_channel = channel
+                            break
+                    
+                    if telegram_channel:
+                        telegram_channel.answer_callback_query(
+                            callback_id,
+                            text="Proposta não encontrada",
+                            show_alert=True
+                        )
+                    
+                    return jsonify({'ok': False, 'error': 'Proposal not found'}), 404
+                
+                # Atualizar status da proposta no banco
+                # Criar tabela de aprovações se não existir
+                conn = sqlite3.connect('agents_orders.db')
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS proposal_approvals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        proposal_id TEXT NOT NULL,
+                        action TEXT NOT NULL CHECK (action IN ('APPROVE', 'CANCEL')),
+                        timestamp TEXT NOT NULL,
+                        telegram_chat_id TEXT,
+                        telegram_message_id INTEGER,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
+                    )
+                """)
+                
+                # Salvar aprovação
+                cursor.execute("""
+                    INSERT INTO proposal_approvals 
+                    (proposal_id, action, timestamp, telegram_chat_id, telegram_message_id)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    proposal_id,
+                    action,
+                    datetime.now().isoformat(),
+                    str(chat_id),
+                    message_id
+                ))
+                conn.commit()
+                conn.close()
+                
+                # Responder ao Telegram
+                from src.notifications import UnifiedNotifier
+                notifier = UnifiedNotifier(CONFIG)
+                telegram_channel = None
+                for channel_name, channel in notifier.channels:
+                    if channel_name == 'telegram':
+                        telegram_channel = channel
+                        break
+                
+                if telegram_channel:
+                    if action == 'APPROVE':
+                        telegram_channel.answer_callback_query(
+                            callback_id,
+                            text="✅ Proposta APROVADA! A ordem será processada.",
+                            show_alert=False
+                        )
+                        
+                        # Atualizar mensagem para mostrar status
+                        updated_text = message.get('text', '') + f"\n\n✅ *APROVADO* em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                        telegram_channel.edit_message_reply_markup(
+                            str(chat_id),
+                            message_id,
+                            updated_text
+                        )
+                    else:
+                        telegram_channel.answer_callback_query(
+                            callback_id,
+                            text="❌ Proposta CANCELADA.",
+                            show_alert=False
+                        )
+                        
+                        # Atualizar mensagem para mostrar status
+                        updated_text = message.get('text', '') + f"\n\n❌ *CANCELADO* em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                        telegram_channel.edit_message_reply_markup(
+                            str(chat_id),
+                            message_id,
+                            updated_text
+                        )
+                
+                return jsonify({'ok': True, 'action': action, 'proposal_id': proposal_id})
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar aprovação: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return jsonify({'ok': False, 'error': str(e)}), 500
+        
+        # Se não for callback_query, retornar OK (pode ser update normal)
+        return jsonify({'ok': True})
+        
+    except Exception as e:
+        logger.error(f"Erro no webhook do Telegram: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print("ðŸš€ API Server - Sistema de Trading com Agentes")
@@ -659,7 +881,8 @@ if __name__ == '__main__':
     print("  POST /data/fetch          - Buscar dados de mercado")
     print("  GET  /strategies/list     - Listar estratÃ©gias")
     print("  POST /test/pricing       - Testar precificaÃ§Ã£o")
-    print("  GET  /metrics             - Ver mÃ©tricas")
+    print("  GET  /metrics             - Ver métricas")
+    print("  POST /telegram/webhook    - Webhook Telegram (aprovações)")
     print("\n" + "=" * 70)
     print("ðŸŒ Servidor iniciando em http://localhost:5000")
     print("=" * 70)

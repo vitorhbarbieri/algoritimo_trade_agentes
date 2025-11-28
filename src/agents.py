@@ -11,9 +11,11 @@ from statsmodels.tsa.stattools import coint, adfuller
 try:
     from .pricing import BlackScholes
     from .utils import StructuredLogger
+    from .comparison_engine import ComparisonEngine, InvestmentOpportunity
 except ImportError:
     from pricing import BlackScholes
     from utils import StructuredLogger
+    from comparison_engine import ComparisonEngine, InvestmentOpportunity
 
 
 @dataclass
@@ -104,6 +106,9 @@ class DayTradeOptionsStrategy:
         self.config = config.get('daytrade_options', {})
         self.logger = logger
         self.bs = BlackScholes()
+        self.comparison_engine = ComparisonEngine(
+            risk_free_rate=config.get('risk_free_rate', 0.05)
+        )
     
     def generate(self, nav: float, timestamp: pd.Timestamp, market_data: Dict) -> List[OrderProposal]:
         """Gera propostas de daytrade de opções."""
@@ -120,13 +125,15 @@ class DayTradeOptionsStrategy:
         
         if not spot_data:
             if self.logger:
-                self.logger.log_error("DayTradeOptionsStrategy: Nenhum dado spot disponível")
+                import logging
+                logging.warning("DayTradeOptionsStrategy: Nenhum dado spot disponível")
             return proposals
         
         # Se não houver opções, tentar buscar para cada ativo com momentum
         if not options_data:
             if self.logger:
-                self.logger.log_error("DayTradeOptionsStrategy: Nenhum dado de opções disponível")
+                import logging
+                logging.warning("DayTradeOptionsStrategy: Nenhum dado de opções disponível")
             # Continuar mesmo sem opções - pode gerar propostas baseadas apenas em momentum
             # Mas não vamos gerar propostas sem opções
             return proposals
@@ -250,77 +257,295 @@ class DayTradeOptionsStrategy:
                         'iv': iv
                     })
                 
-                if not viable_calls:
-                    continue
+                # 3. COMPARAÇÃO MATEMÁTICA: Opções vs Ações
+                # Primeiro, avaliar oportunidade em ações (spot)
+                STANDARD_TICKET_VALUE = 1000.0
+                take_profit_pct = cfg.get('take_profit_pct', 0.10)
+                stop_loss_pct = cfg.get('stop_loss_pct', 0.40)
                 
-                # 3. Selecionar melhor call (maior gamma, menor spread, maior liquidez)
-                best_call = max(
-                    viable_calls,
-                    key=lambda o: (o['gamma'], -o['spread_pct'], o['volume'])
-                )
+                # Calcular volatilidade histórica (simplificado - usar IV como proxy se disponível)
+                historical_volatility = spot_info.get('volatility', spot_info.get('iv', 0.25))
+                if historical_volatility == 0:
+                    historical_volatility = 0.25  # Fallback
                 
-                # 4. Calcular sizing baseado no risco
-                risk_per_trade = cfg.get('risk_per_trade', 0.002)
-                max_risk = nav * risk_per_trade
-                premium_per_contract = best_call['mid'] * 100  # Opções são multiplicadas por 100
+                # Calcular oportunidade em ações
+                spot_opportunity = None
+                enable_spot = cfg.get('enable_spot_trading', True)
+                if enable_spot:
+                    try:
+                        spot_opportunity = self.comparison_engine.calculate_spot_opportunity(
+                            asset=asset,
+                            current_price=last_price,
+                            expected_price_change_pct=intraday_return * 100,  # Converter para %
+                            volatility=historical_volatility,
+                            capital_available=nav,
+                            risk_per_trade=cfg.get('risk_per_trade', 0.002)
+                        )
+                    except Exception as e:
+                        if self.logger:
+                            import logging
+                            logging.warning(f"Erro ao calcular oportunidade spot para {asset}: {e}")
                 
-                if premium_per_contract == 0:
-                    continue
+                # Avaliar melhor opção disponível
+                best_option_opportunity = None
+                best_option_call = None
                 
-                qty = int(max_risk / premium_per_contract)
+                if viable_calls:
+                    # Selecionar melhor call (maior gamma, menor spread, maior liquidez)
+                    best_call = max(
+                        viable_calls,
+                        key=lambda o: (o['gamma'], -o['spread_pct'], o['volume'])
+                    )
+                    
+                    # Calcular oportunidade em opções
+                    try:
+                        best_option_opportunity = self.comparison_engine.calculate_option_opportunity(
+                            asset=asset,
+                            strike=best_call['strike'],
+                            current_price=last_price,
+                            option_premium=best_call['mid'],
+                            delta=best_call['delta'],
+                            gamma=best_call['gamma'],
+                            vega=best_call['vega'],
+                            days_to_expiry=best_call['days_to_expiry'],
+                            implied_vol=best_call['iv'],
+                            expected_price_change_pct=intraday_return * 100,
+                            capital_available=nav,
+                            risk_per_trade=cfg.get('risk_per_trade', 0.002)
+                        )
+                        best_option_call = best_call
+                    except Exception as e:
+                        if self.logger:
+                            import logging
+                            logging.warning(f"Erro ao calcular oportunidade opção para {asset}: {e}")
                 
-                if qty <= 0:
-                    continue
+                # Comparar e escolher a melhor oportunidade
+                if spot_opportunity and best_option_opportunity:
+                    best_opp, comparison_reason = self.comparison_engine.compare_opportunities(
+                        spot_opportunity, best_option_opportunity
+                    )
+                    
+                    if self.logger:
+                        import logging
+                        logging.info(f"{asset}: {comparison_reason}")
+                    
+                    # Gerar proposta baseada na melhor oportunidade
+                    if best_opp.instrument_type == 'options':
+                        proposal = self._create_option_proposal(
+                            asset, best_option_call, last_price, intraday_return, volume_ratio,
+                            timestamp, cfg, STANDARD_TICKET_VALUE, best_opp.score
+                        )
+                        if proposal:
+                            proposals.append(proposal)
+                    else:
+                        proposal = self._create_spot_proposal(
+                            asset, last_price, intraday_return, volume_ratio,
+                            timestamp, cfg, STANDARD_TICKET_VALUE, best_opp.score
+                        )
+                        if proposal:
+                            proposals.append(proposal)
                 
-                # 5. Gerar OrderProposal
-                proposal_id = f"DAYOPT-{asset}-{best_call['strike']}-{best_call['expiry'].strftime('%Y%m%d')}-{int(timestamp.timestamp())}"
+                elif best_option_opportunity:
+                    # Só tem opção disponível
+                    proposal = self._create_option_proposal(
+                        asset, best_option_call, last_price, intraday_return, volume_ratio,
+                        timestamp, cfg, STANDARD_TICKET_VALUE, best_option_opportunity.score
+                    )
+                    if proposal:
+                        proposals.append(proposal)
                 
-                proposal = OrderProposal(
-                    proposal_id=proposal_id,
-                    strategy='daytrade_options',
-                    instrument_type='options',
-                    symbol=f"{asset}_{best_call['strike']}_C_{best_call['expiry'].strftime('%Y%m%d')}",
-                    side='BUY',
-                    quantity=qty,
-                    price=best_call['ask'],  # Preço de compra (ask)
-                    order_type='LIMIT',
-                    metadata={
-                        'underlying': asset,
-                        'strike': best_call['strike'],
-                        'expiry': best_call['expiry'].isoformat(),
-                        'days_to_expiry': best_call['days_to_expiry'],
-                        'delta': best_call['delta'],
-                        'gamma': best_call['gamma'],
-                        'vega': best_call['vega'],
-                        'iv': best_call['iv'],
-                        'intraday_return': float(intraday_return),
-                        'volume_ratio': float(volume_ratio),
-                        'spread_pct': float(best_call['spread_pct']),
-                        'premium': float(best_call['mid']),
-                        'max_risk': float(max_risk),
-                        'take_profit_pct': cfg.get('take_profit_pct', 0.10),
-                        'stop_loss_pct': cfg.get('stop_loss_pct', 0.40),
-                        'eod_close': True
-                    }
-                )
+                elif spot_opportunity and enable_spot:
+                    # Só tem ação disponível
+                    proposal = self._create_spot_proposal(
+                        asset, last_price, intraday_return, volume_ratio,
+                        timestamp, cfg, STANDARD_TICKET_VALUE, spot_opportunity.score
+                    )
+                    if proposal:
+                        proposals.append(proposal)
                 
-                proposals.append(proposal)
-                
-                if self.logger:
-                    self.logger.log_trader_proposal(proposal_id, 'daytrade_options', {
-                        'asset': asset,
-                        'intraday_return': intraday_return,
-                        'volume_ratio': volume_ratio,
-                        'strike': best_call['strike'],
-                        'delta': best_call['delta']
-                    })
+                # Se não houver opções mas estratégia permite trading spot, continuar
+                elif enable_spot and not viable_calls:
+                    # Gerar proposta de ação mesmo sem opções
+                    proposal = self._create_spot_proposal(
+                        asset, last_price, intraday_return, volume_ratio,
+                        timestamp, cfg, STANDARD_TICKET_VALUE, 0.5  # Score padrão
+                    )
+                    if proposal:
+                        proposals.append(proposal)
             
             except Exception as e:
                 if self.logger:
-                    self.logger.log_error(f"Erro em DayTradeOptionsStrategy para {asset}: {str(e)}")
+                    import logging
+                    logging.error(f"Erro em DayTradeOptionsStrategy para {asset}: {str(e)}")
                 continue
         
-        return proposals
+        # Ordenar propostas por score (priorização)
+        proposals_with_scores = []
+        for prop in proposals:
+            score = prop.metadata.get('comparison_score', 0)
+            proposals_with_scores.append((score, prop))
+        
+        # Ordenar por score (maior primeiro)
+        proposals_with_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        # Filtrar por score mínimo se configurado
+        min_score = cfg.get('min_comparison_score', 0)
+        filtered_proposals = [prop for score, prop in proposals_with_scores if score >= min_score]
+        
+        # Retornar apenas as melhores oportunidades (top 10)
+        return filtered_proposals[:10]
+    
+    def _create_option_proposal(
+        self, asset: str, best_call: Dict, last_price: float, intraday_return: float,
+        volume_ratio: float, timestamp: pd.Timestamp, cfg: Dict,
+        STANDARD_TICKET_VALUE: float, comparison_score: float
+    ) -> Optional[OrderProposal]:
+        """Cria proposta de opção."""
+        try:
+            premium_unit = best_call['mid']
+            premium_per_contract = premium_unit * 100
+            
+            if premium_per_contract == 0:
+                return None
+            
+            qty = int(STANDARD_TICKET_VALUE / premium_per_contract)
+            if qty <= 0:
+                qty = 1
+            
+            actual_value = qty * premium_per_contract
+            if actual_value < STANDARD_TICKET_VALUE * 0.8:
+                qty = int(STANDARD_TICKET_VALUE / premium_per_contract) + 1
+                actual_value = qty * premium_per_contract
+            
+            proposal_id = f"DAYOPT-{asset}-{best_call['strike']}-{best_call['expiry'].strftime('%Y%m%d')}-{int(timestamp.timestamp())}"
+            
+            entry_price_unit = best_call['ask']
+            entry_price_total = entry_price_unit * qty * 100
+            take_profit_pct = cfg.get('take_profit_pct', 0.10)
+            stop_loss_pct = cfg.get('stop_loss_pct', 0.40)
+            
+            exit_price_tp_unit = entry_price_unit * (1 + take_profit_pct)
+            exit_price_tp_total = exit_price_tp_unit * qty * 100
+            exit_price_sl_unit = entry_price_unit * (1 - stop_loss_pct)
+            exit_price_sl_total = exit_price_sl_unit * qty * 100
+            
+            ticket_value = STANDARD_TICKET_VALUE
+            gain_value = ticket_value * take_profit_pct
+            loss_value = ticket_value * stop_loss_pct
+            
+            proposal = OrderProposal(
+                proposal_id=proposal_id,
+                strategy='daytrade_options',
+                instrument_type='options',
+                symbol=f"{asset}_{best_call['strike']}_C_{best_call['expiry'].strftime('%Y%m%d')}",
+                side='BUY',
+                quantity=qty,
+                price=entry_price_unit,
+                order_type='LIMIT',
+                metadata={
+                    'underlying': asset,
+                    'strike': best_call['strike'],
+                    'expiry': best_call['expiry'].isoformat(),
+                    'days_to_expiry': best_call['days_to_expiry'],
+                    'delta': best_call['delta'],
+                    'gamma': best_call['gamma'],
+                    'vega': best_call['vega'],
+                    'iv': best_call['iv'],
+                    'intraday_return': float(intraday_return),
+                    'volume_ratio': float(volume_ratio),
+                    'spread_pct': float(best_call['spread_pct']),
+                    'premium': float(best_call['mid']),
+                    'ticket_value': float(ticket_value),
+                    'entry_price': float(entry_price_unit),
+                    'entry_price_total': float(entry_price_total),
+                    'exit_price_tp': float(exit_price_tp_unit),
+                    'exit_price_tp_total': float(exit_price_tp_total),
+                    'exit_price_sl': float(exit_price_sl_unit),
+                    'exit_price_sl_total': float(exit_price_sl_total),
+                    'take_profit_pct': take_profit_pct,
+                    'stop_loss_pct': stop_loss_pct,
+                    'gain_value': float(gain_value),
+                    'loss_value': float(loss_value),
+                    'comparison_score': float(comparison_score),
+                    'comparison_type': 'options',
+                    'eod_close': True
+                }
+            )
+            
+            return proposal
+        except Exception as e:
+            if self.logger:
+                import logging
+                logging.error(f"Erro ao criar proposta de opção: {e}")
+            return None
+    
+    def _create_spot_proposal(
+        self, asset: str, last_price: float, intraday_return: float,
+        volume_ratio: float, timestamp: pd.Timestamp, cfg: Dict,
+        STANDARD_TICKET_VALUE: float, comparison_score: float
+    ) -> Optional[OrderProposal]:
+        """Cria proposta de ação (spot)."""
+        try:
+            take_profit_pct = cfg.get('take_profit_pct', 0.10)
+            stop_loss_pct = cfg.get('stop_loss_pct', 0.40)
+            
+            # Calcular quantidade para ticket de R$ 1000
+            qty = int(STANDARD_TICKET_VALUE / last_price)
+            if qty <= 0:
+                return None
+            
+            actual_value = qty * last_price
+            
+            proposal_id = f"DAYSPOT-{asset}-{int(timestamp.timestamp())}"
+            
+            entry_price = last_price
+            entry_price_total = actual_value
+            
+            exit_price_tp = entry_price * (1 + take_profit_pct)
+            exit_price_tp_total = exit_price_tp * qty
+            exit_price_sl = entry_price * (1 - stop_loss_pct)
+            exit_price_sl_total = exit_price_sl * qty
+            
+            ticket_value = STANDARD_TICKET_VALUE
+            gain_value = ticket_value * take_profit_pct
+            loss_value = ticket_value * stop_loss_pct
+            
+            proposal = OrderProposal(
+                proposal_id=proposal_id,
+                strategy='daytrade_options',
+                instrument_type='spot',
+                symbol=asset,
+                side='BUY',
+                quantity=qty,
+                price=entry_price,
+                order_type='LIMIT',
+                metadata={
+                    'underlying': asset,
+                    'intraday_return': float(intraday_return),
+                    'volume_ratio': float(volume_ratio),
+                    'ticket_value': float(ticket_value),
+                    'entry_price': float(entry_price),
+                    'entry_price_total': float(entry_price_total),
+                    'exit_price_tp': float(exit_price_tp),
+                    'exit_price_tp_total': float(exit_price_tp_total),
+                    'exit_price_sl': float(exit_price_sl),
+                    'exit_price_sl_total': float(exit_price_sl_total),
+                    'take_profit_pct': take_profit_pct,
+                    'stop_loss_pct': stop_loss_pct,
+                    'gain_value': float(gain_value),
+                    'loss_value': float(loss_value),
+                    'comparison_score': float(comparison_score),
+                    'comparison_type': 'spot',
+                    'eod_close': True
+                }
+            )
+            
+            return proposal
+        except Exception as e:
+            if self.logger:
+                import logging
+                logging.error(f"Erro ao criar proposta de ação: {e}")
+            return None
 
 
 class TraderAgent:
@@ -351,7 +576,8 @@ class TraderAgent:
                 proposals.extend(strategy_proposals)
             except Exception as e:
                 if self.logger:
-                    self.logger.log_error(f"Erro em estratégia {strategy.__class__.__name__}: {str(e)}")
+                    import logging
+                    logging.error(f"Erro em estratégia {strategy.__class__.__name__}: {str(e)}")
         
         # Estratégia 1: Delta-hedged Volatility Arbitrage
         if self.config.get('enable_vol_arb', True):
@@ -382,7 +608,8 @@ class TraderAgent:
                     self.orders_repo.save_proposal(proposal_dict)
                 except Exception as e:
                     if self.logger:
-                        self.logger.log_error(f"Erro ao salvar proposta {proposal.proposal_id}: {e}")
+                        import logging
+                        logging.error(f"Erro ao salvar proposta {proposal.proposal_id}: {e}")
         
         return proposals
     
@@ -599,7 +826,8 @@ class RiskAgent:
                 self.orders_repo.save_risk_evaluation(evaluation_dict)
             except Exception as e:
                 if self.logger:
-                    self.logger.log_error(f"Erro ao salvar avaliação {proposal.proposal_id}: {e}")
+                    import logging
+                    logging.error(f"Erro ao salvar avaliação {proposal.proposal_id}: {e}")
     
     def evaluate_proposal(self, proposal: OrderProposal, market_data: Dict) -> Tuple[str, Optional[OrderProposal], str]:
         """
@@ -643,10 +871,16 @@ class RiskAgent:
                 return ('REJECT', None, reason)
             
             # Verificar exposição agregada em opções curtas
+            # Nota: Para calcular exposição precisa, precisaríamos dos preços de mercado
+            # Por enquanto, usamos uma estimativa baseada na quantidade
             total_options_exposure = sum(
-                abs(qty * price) for symbol, qty in self.portfolio.positions.items()
+                abs(qty * proposal.price * 100) if proposal.price else abs(qty * 1000)
+                for symbol, qty in self.portfolio.positions.items()
                 if 'options' in symbol.lower() or '_C_' in symbol or '_P_' in symbol
             )
+            # Se não houver posições, usar o risco da proposta atual
+            if total_options_exposure == 0:
+                total_options_exposure = abs(proposal.quantity * proposal.price * 100) if proposal.price else 0
             max_options_exposure = daytrade_cfg.get('max_options_exposure_pct', 0.15)
             if total_options_exposure > self.portfolio.nav * max_options_exposure:
                 reason = f'Exposição agregada em opções excedida: {total_options_exposure:.2f}'

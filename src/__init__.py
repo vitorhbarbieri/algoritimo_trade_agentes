@@ -1,6 +1,5 @@
 """
-Módulo principal do projeto de trading com agentes cooperativos.
+Pacote src - Módulos principais do sistema de trading.
 """
 
 __version__ = "1.0.0"
-
