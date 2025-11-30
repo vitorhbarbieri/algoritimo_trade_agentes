@@ -816,7 +816,7 @@ class RiskAgent:
                 from datetime import datetime
                 evaluation_dict = {
                     'proposal_id': proposal.proposal_id,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': self.trading_schedule.get_current_b3_time().isoformat() if hasattr(self, 'trading_schedule') else datetime.now(pytz.timezone('America/Sao_Paulo')).isoformat(),
                     'decision': decision,
                     'reason': reason,
                     'details': {},
@@ -966,7 +966,12 @@ class RiskAgent:
         nav_loss = (self.portfolio.initial_nav - self.portfolio.nav) / self.portfolio.initial_nav if self.portfolio.initial_nav > 0 else 0
         
         if self.logger:
-            self.logger.log_decision('kill_switch', {'active': True, 'nav_loss': nav_loss})
+            # Verificar se logger tem método log_decision (StructuredLogger) ou usar logging padrão
+            if hasattr(self.logger, 'log_decision'):
+                self.logger.log_decision('kill_switch', {'active': True, 'nav_loss': nav_loss})
+            else:
+                import logging
+                logging.warning(f"Kill switch ativado. Perda NAV: {nav_loss:.2%}")
         
         # Notificar por email
         if self.email_notifier:

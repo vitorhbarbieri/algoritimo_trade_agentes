@@ -69,9 +69,9 @@ def run_health_monitor_loop(health_monitor_instance):
                 logger.info(f"[HEALTH] Executando verificação de saúde ({current_time.strftime('%H:%M:%S')})...")
                 health_monitor_instance.run_health_check()
                 
-                # Verificar se deve enviar relatório (12:00 ou 15:00)
+                # Verificar se deve enviar relatório (11:00 ou 15:00)
                 current_time_str = current_time.strftime('%H:%M')
-                if current_time_str in ['12:00', '15:00']:
+                if current_time_str in ['11:00', '15:00']:
                     logger.info(f"[HEALTH] Enviando relatório às {current_time_str}...")
                     health_monitor_instance.send_report(force=True)
                 
@@ -191,7 +191,7 @@ def main():
         logger.info("Monitor de Saúde da Captura:")
         logger.info("  - Verificará saúde da captura a cada 1 hora")
         logger.info("  - Corrigirá problemas automaticamente")
-        logger.info("  - Enviará relatórios às 12:00 e 15:00 via Telegram")
+        logger.info("  - Enviará relatórios às 11:00 e 15:00 via Telegram")
     logger.info("")
     logger.info("Pressione Ctrl+C para parar os agentes")
     logger.info("")

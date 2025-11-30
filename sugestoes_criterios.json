@@ -1,0 +1,10 @@
+{
+  "min_intraday_return": 0.0044312472065933806,
+  "min_volume_ratio": 0.38839966029114487,
+  "delta_min": 0.15,
+  "delta_max": 0.7,
+  "max_dte": 14,
+  "max_spread_pct": 0.1,
+  "min_option_volume": 100,
+  "take_profit_pct": 0.005
+}

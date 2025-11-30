@@ -46,7 +46,7 @@ class DataHealthMonitor:
         self.monitored_tickers = config.get('monitored_tickers', [])
         
         # Horários de relatório
-        self.report_times = ['12:00', '15:00']
+        self.report_times = ['11:00', '15:00']
     
     def check_database_health(self) -> Dict:
         """Verifica saúde do banco de dados."""

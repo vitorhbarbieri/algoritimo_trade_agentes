@@ -95,6 +95,103 @@ def get_agents_activity():
     except:
         return None
 
+@st.cache_data(ttl=5)
+def get_portfolio_positions():
+    """Obtém posições do portfólio."""
+    try:
+        response = requests.get(f"{BASE_URL}/portfolio/positions", timeout=15)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {
+                'status': 'error',
+                'message': f'Erro HTTP {response.status_code}: {response.text[:200]}'
+            }
+    except requests.exceptions.ConnectionError:
+        return {
+            'status': 'error',
+            'message': 'Não foi possível conectar à API. Verifique se o servidor está rodando: python api_server.py'
+        }
+    except requests.exceptions.Timeout:
+        return {
+            'status': 'error',
+            'message': 'Timeout ao buscar dados do portfólio. A API pode estar sobrecarregada.'
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': f'Erro ao buscar portfólio: {str(e)}'
+        }
+
+def get_daytrade_monitoring():
+    """Obtém dados de monitoramento do DayTrade."""
+    try:
+        response = requests.get(f"{BASE_URL}/daytrade/monitoring", timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            # Garantir que sempre retorna um dicionário
+            if isinstance(data, dict):
+                return data
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Tipo de resposta inesperado: {type(data)}'
+                }
+        else:
+            return {
+                'status': 'error',
+                'message': f'Erro HTTP {response.status_code}: {response.text[:200]}'
+            }
+    except requests.exceptions.ConnectionError as e:
+        return {
+            'status': 'error',
+            'message': f'Não foi possível conectar à API. Verifique se o servidor está rodando: python api_server.py. Erro: {str(e)}'
+        }
+    except requests.exceptions.Timeout:
+        return {
+            'status': 'error',
+            'message': 'Timeout ao buscar dados de monitoramento. A API pode estar sobrecarregada.'
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': f'Erro ao buscar monitoramento: {str(e)}'
+        }
+
+def get_daytrade_analysis(days=1):
+    """Obtém análise detalhada de propostas do DayTrade."""
+    try:
+        response = requests.get(f"{BASE_URL}/daytrade/analysis", params={'days': days}, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict):
+                return data
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Tipo de resposta inesperado: {type(data)}'
+                }
+        else:
+            return {
+                'status': 'error',
+                'message': f'Erro HTTP {response.status_code}: {response.text[:200]}'
+            }
+    except requests.exceptions.ConnectionError as e:
+        return {
+            'status': 'error',
+            'message': f'Não foi possível conectar à API. Erro: {str(e)}'
+        }
+    except requests.exceptions.Timeout:
+        return {
+            'status': 'error',
+            'message': 'Timeout ao buscar análise.'
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': f'Erro ao buscar análise: {str(e)}'
+        }
+
 @st.cache_data(ttl=10)
 def get_backtest_results():
     """Obtém resultados do backtest."""
@@ -292,10 +389,11 @@ def main():
         return
     
     # Tabs principais
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 Visão Geral",
         "🤖 Atividade dos Agentes",
         "💚 Saúde dos Agentes",
+        "📈 DayTrade Monitor",
         "💰 Portfólio",
         "📈 Backtest",
         "📋 Ações Monitoradas",
@@ -818,61 +916,593 @@ def main():
                     except Exception as e:
                         st.error(f"Erro: {e}")
     
-    # TAB 4: Portfólio
+    # TAB 4: DayTrade Monitor
     with tab4:
-        st.header("💰 Status do Portfólio")
+        st.header("📈 DayTrade Monitor - Acompanhamento em Tempo Real")
         
-        results = get_backtest_results()
+        # Auto-refresh toggle (sem executar rerun aqui, apenas definir a variável)
+        col_refresh1, col_refresh2 = st.columns([3, 1])
+        with col_refresh1:
+            st.info("🔄 Atualização automática a cada 3 segundos")
+        with col_refresh2:
+            auto_refresh = st.checkbox("Ativar Auto-refresh", value=True, key="daytrade_auto_refresh")
         
-        if results and 'results' in results:
-            res = results['results']
+        # Mostrar status de carregamento
+        try:
+            with st.spinner("Carregando dados de monitoramento..."):
+                monitoring_data = get_daytrade_monitoring()
+        except Exception as e:
+            st.error(f"❌ **Erro ao buscar dados:** {str(e)}")
+            st.info("💡 **Solução:** Verifique se a API está rodando: `python api_server.py`")
+            # Auto-refresh no erro também
+            if auto_refresh:
+                time.sleep(3)
+                st.rerun()
+            st.stop()
+        
+        # Debug: mostrar o que foi retornado
+        if monitoring_data is None:
+            st.error("❌ **Erro: Nenhum dado retornado da API**")
+            st.info("""
+            **Possíveis causas:**
+            1. API não está rodando - Execute: `python api_server.py`
+            2. Banco de dados não inicializado
+            3. Erro de conexão com a API
             
-            # Último snapshot
-            if 'snapshots' in res and res['snapshots']:
-                latest = res['snapshots'][-1]
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric("NAV Atual", f"R$ {latest.get('nav', 0):,.2f}")
-                
-                with col2:
-                    st.metric("Cash", f"R$ {latest.get('cash', 0):,.2f}")
-                
-                with col3:
-                    st.metric("Valor das Posições", f"R$ {latest.get('position_value', 0):,.2f}")
-                
-                # Posições atuais
-                positions = latest.get('positions', {})
-                if positions:
-                    st.subheader("📊 Posições Atuais")
-                    df_positions = pd.DataFrame([
-                        {'Símbolo': symbol, 'Quantidade': qty}
-                        for symbol, qty in positions.items()
-                    ])
-                    st.dataframe(df_positions, use_container_width=True, hide_index=True)
+            **Como verificar:**
+            - Verifique se a API está respondendo em http://localhost:5000
+            - Execute: `python testar_endpoint_daytrade.py` para diagnóstico
+            """)
+            st.stop()
+        
+        # Verificar se é um dicionário
+        if not isinstance(monitoring_data, dict):
+            st.error(f"❌ **Erro: Tipo de dados inesperado:** {type(monitoring_data)}")
+            st.json(monitoring_data)
+            st.stop()
+        
+        if monitoring_data.get('status') == 'error':
+            st.error(f"❌ **Erro na API:** {monitoring_data.get('message', 'Erro desconhecido')}")
+            if monitoring_data.get('traceback'):
+                with st.expander("🔍 Detalhes do Erro"):
+                    st.code(monitoring_data['traceback'])
+            st.info("💡 **Solução:** Verifique se a API está rodando: `python api_server.py`")
+            if auto_refresh:
+                time.sleep(3)
+                st.rerun()
+            st.stop()
+        
+        if monitoring_data.get('status') == 'success':
+            market_status = monitoring_data.get('market_status', {})
+            stats = monitoring_data.get('statistics', {})
+            
+            # Status do Mercado
+            st.subheader("🕐 Status do Mercado")
+            col_m1, col_m2, col_m3 = st.columns(3)
+            
+            with col_m1:
+                status = market_status.get('status', 'UNKNOWN')
+                if status == 'TRADING':
+                    st.success(f"✅ **Mercado Aberto** ({status})")
+                elif status == 'PRE_MARKET':
+                    st.info(f"⏰ **Pré-Mercado** ({status})")
+                elif status == 'POST_MARKET':
+                    st.warning(f"🌅 **Pós-Mercado** ({status})")
                 else:
-                    st.info("Nenhuma posição aberta no momento.")
+                    st.error(f"🔒 **Mercado Fechado** ({status})")
             
-            # Execuções
-            if 'fills' in res and res['fills']:
-                st.subheader("💼 Histórico de Execuções")
-                df_fills = pd.DataFrame(res['fills'])
+            with col_m2:
+                b3_time = market_status.get('b3_time', '')
+                if b3_time:
+                    try:
+                        time_str = b3_time[:19].replace('T', ' ')
+                        st.metric("Horário B3", time_str)
+                    except:
+                        st.metric("Horário B3", "N/A")
+            
+            with col_m3:
+                is_trading = market_status.get('is_trading_hours', False)
+                st.metric("Horário de Trading", "✅ Sim" if is_trading else "❌ Não")
+            
+            st.divider()
+            
+            # Estatísticas Principais
+            st.subheader("📊 Estatísticas (Últimas 24h)")
+            col_s1, col_s2, col_s3, col_s4, col_s5, col_s6 = st.columns(6)
+            
+            with col_s1:
+                st.metric("Propostas Geradas", stats.get('total_proposals_24h', 0))
+            
+            with col_s2:
+                approved = stats.get('approved_proposals', 0)
+                st.metric("✅ Aprovadas", approved, delta=None)
+            
+            with col_s3:
+                rejected = stats.get('rejected_proposals', 0)
+                st.metric("❌ Rejeitadas", rejected, delta=None)
+            
+            with col_s4:
+                approval_rate = stats.get('approval_rate', 0)
+                st.metric("Taxa Aprovação", f"{approval_rate:.1f}%")
+            
+            with col_s5:
+                st.metric("Posições Abertas", stats.get('open_positions', 0))
+            
+            with col_s6:
+                st.metric("Capturas Recentes", stats.get('recent_captures', 0))
+            
+            st.divider()
+            
+            # Gráficos
+            col_chart1, col_chart2 = st.columns(2)
+            
+            with col_chart1:
+                # Gráfico de Propostas vs Avaliações
+                if stats.get('total_proposals_24h', 0) > 0:
+                    fig_proposals = go.Figure()
+                    fig_proposals.add_trace(go.Bar(
+                        name='Aprovadas',
+                        x=['Propostas'],
+                        y=[approved],
+                        marker_color='green'
+                    ))
+                    fig_proposals.add_trace(go.Bar(
+                        name='Rejeitadas',
+                        x=['Propostas'],
+                        y=[rejected],
+                        marker_color='red'
+                    ))
+                    fig_proposals.update_layout(
+                        title="Propostas Aprovadas vs Rejeitadas (24h)",
+                        barmode='stack',
+                        height=300
+                    )
+                    st.plotly_chart(fig_proposals, use_container_width=True)
+                else:
+                    st.info("📊 **Nenhum dado para gráfico**")
+                    st.caption("Gráfico será exibido quando houver propostas geradas")
+            
+            with col_chart2:
+                # Gráfico de Taxa de Aprovação
+                if stats.get('total_proposals_24h', 0) > 0:
+                    fig_rate = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=approval_rate,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Taxa de Aprovação (%)"},
+                        gauge={
+                            'axis': {'range': [None, 100]},
+                            'bar': {'color': "green" if approval_rate >= 50 else "red"},
+                            'steps': [
+                                {'range': [0, 50], 'color': "lightgray"},
+                                {'range': [50, 100], 'color': "gray"}
+                            ],
+                            'threshold': {
+                                'line': {'color': "red", 'width': 4},
+                                'thickness': 0.75,
+                                'value': 50
+                            }
+                        }
+                    ))
+                    fig_rate.update_layout(height=300)
+                    st.plotly_chart(fig_rate, use_container_width=True)
+                else:
+                    st.info("📊 **Nenhum dado para gráfico**")
+                    st.caption("Gráfico será exibido quando houver propostas geradas")
+            
+            st.divider()
+            
+            # Propostas Recentes
+            st.subheader("💡 Propostas Recentes")
+            recent_proposals = monitoring_data.get('recent_proposals', [])
+            if recent_proposals:
+                df_proposals = pd.DataFrame(recent_proposals)
+                display_cols = []
+                for col in ['symbol', 'side', 'quantity', 'price', 'timestamp', 'strategy']:
+                    if col in df_proposals.columns:
+                        display_cols.append(col)
                 
-                # Resumo por símbolo
-                if not df_fills.empty and 'symbol' in df_fills.columns:
-                    fills_summary = df_fills.groupby('symbol').agg({
-                        'quantity': 'sum',
-                        'total_cost': 'sum',
-                        'commission': 'sum'
-                    }).reset_index()
-                    fills_summary.columns = ['Símbolo', 'Quantidade Total', 'Custo Total', 'Comissões']
-                    st.dataframe(fills_summary, use_container_width=True, hide_index=True)
+                if display_cols:
+                    display_df = df_proposals[display_cols].head(10).copy()
+                    if 'timestamp' in display_df.columns:
+                        display_df['timestamp'] = display_df['timestamp'].apply(lambda x: x[:19].replace('T', ' ') if x else 'N/A')
+                    if 'price' in display_df.columns:
+                        display_df['price'] = display_df['price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                    
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Nenhuma coluna disponível para exibir.")
+            else:
+                st.info("Nenhuma proposta gerada nas últimas 24 horas.")
+            
+            st.divider()
+            
+            # Capturas de Dados Recentes
+            st.subheader("📡 Capturas de Dados de Mercado")
+            recent_captures = monitoring_data.get('recent_captures', [])
+            recent_tickers = monitoring_data.get('recent_tickers', [])
+            last_capture = monitoring_data.get('last_capture_time', '')
+            
+            col_c1, col_c2 = st.columns(2)
+            
+            with col_c1:
+                if last_capture:
+                    try:
+                        capture_time = last_capture[:19].replace('T', ' ')
+                        st.metric("Última Captura", capture_time)
+                    except:
+                        st.metric("Última Captura", "N/A")
+                else:
+                    st.warning("⚠️ **Nenhuma captura recente**")
+                    st.caption("Última captura: N/A")
+            
+            with col_c2:
+                ticker_count = len(recent_tickers)
+                st.metric("Tickers Monitorados", ticker_count)
+                if ticker_count == 0:
+                    st.caption("⚠️ Nenhum ticker capturado nas últimas 2h")
+            
+            if recent_tickers:
+                st.write(f"**Tickers capturados:** {', '.join(recent_tickers[:15])}")
+                if len(recent_tickers) > 15:
+                    st.caption(f"... e mais {len(recent_tickers) - 15} tickers")
+            else:
+                st.info("📋 Nenhum ticker capturado nas últimas 2 horas.")
+                st.caption("💡 **Dica:** Verifique se o MonitoringService está rodando e capturando dados")
+            
+            if recent_captures:
+                try:
+                    df_captures = pd.DataFrame(recent_captures)
+                    display_cols = []
+                    for col in ['ticker', 'data_type', 'last_price', 'volume', 'created_at']:
+                        if col in df_captures.columns:
+                            display_cols.append(col)
+                    
+                    if display_cols:
+                        display_df = df_captures[display_cols].head(15).copy()
+                        if 'created_at' in display_df.columns:
+                            display_df['created_at'] = display_df['created_at'].apply(lambda x: x[:19].replace('T', ' ') if isinstance(x, str) else 'N/A')
+                        if 'last_price' in display_df.columns:
+                            display_df['last_price'] = display_df['last_price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                        
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Nenhuma coluna disponível para exibir.")
+                except Exception as e:
+                    st.error(f"Erro ao processar capturas: {e}")
+                    st.json(recent_captures[:3])  # Mostrar dados brutos para debug
+            else:
+                st.info("📋 Nenhuma captura de dados nas últimas 2 horas.")
+                st.caption("💡 **Dica:** O sistema captura dados a cada 5 minutos durante o pregão")
+            
+            st.divider()
+            
+            # Posições Abertas
+            st.subheader("💼 Posições Abertas (DayTrade)")
+            open_positions = monitoring_data.get('open_positions', [])
+            if open_positions:
+                df_positions = pd.DataFrame(open_positions)
+                display_cols = []
+                for col in ['symbol', 'side', 'quantity', 'avg_price', 'current_price', 'unrealized_pnl']:
+                    if col in df_positions.columns:
+                        display_cols.append(col)
+                
+                if display_cols:
+                    display_df = df_positions[display_cols].copy()
+                    if 'avg_price' in display_df.columns:
+                        display_df['avg_price'] = display_df['avg_price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                    if 'current_price' in display_df.columns:
+                        display_df['current_price'] = display_df['current_price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                    if 'unrealized_pnl' in display_df.columns:
+                        display_df['unrealized_pnl'] = display_df['unrealized_pnl'].apply(lambda x: f"R$ {x:,.2f}" if pd.notna(x) else "R$ 0.00")
+                    
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # Gráfico de PnL
+                    if 'symbol' in df_positions.columns and 'unrealized_pnl' in df_positions.columns:
+                        fig_pnl = px.bar(
+                            df_positions,
+                            x='symbol',
+                            y='unrealized_pnl',
+                            title="PnL Não Realizado por Posição",
+                            labels={'symbol': 'Símbolo', 'unrealized_pnl': 'PnL (R$)'},
+                            color='unrealized_pnl',
+                            color_continuous_scale=['red', 'green']
+                        )
+                        fig_pnl.update_layout(showlegend=False, height=400)
+                        st.plotly_chart(fig_pnl, use_container_width=True)
+            else:
+                st.info("💼 Nenhuma posição aberta no momento.")
+                
+            # Informações adicionais de diagnóstico
+            st.divider()
+            st.subheader("ℹ️ Informações do Sistema")
+            col_info1, col_info2 = st.columns(2)
+            
+            with col_info1:
+                st.write("**Última atualização:**", datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+                if last_capture:
+                    st.write("**Última captura de dados:**", last_capture[:19].replace('T', ' ') if last_capture else "N/A")
+                else:
+                    st.warning("⚠️ Nenhuma captura de dados nas últimas 2 horas")
+            
+            with col_info2:
+                st.write("**Total de tickers monitorados:**", len(recent_tickers))
+                st.write("**Total de capturas (2h):**", stats.get('recent_captures', 0))
+                if stats.get('recent_captures', 0) == 0:
+                    st.warning("⚠️ Nenhuma captura recente")
+                    st.caption("💡 O sistema captura dados a cada 5 minutos durante o pregão")
+            
+            # Mensagem de status geral
+            st.divider()
+            if stats.get('total_proposals_24h', 0) == 0 and stats.get('recent_captures', 0) == 0:
+                st.warning("""
+                ⚠️ **Sistema parece estar inativo**
+                
+                **Possíveis causas:**
+                1. MonitoringService não está rodando
+                2. Mercado está fechado
+                3. Nenhum dado sendo capturado
+                
+                **Como verificar:**
+                - Execute: `python iniciar_agentes.py`
+                - Verifique os logs em `logs/`
+                - Execute: `python monitorar_daytrade.py`
+                """)
+            elif stats.get('total_proposals_24h', 0) == 0:
+                st.info("""
+                ℹ️ **Nenhuma proposta gerada nas últimas 24 horas**
+                
+                Isso é normal se:
+                - O mercado está fechado
+                - Não há oportunidades que atendam aos critérios do DayTrade
+                - Os dados estão sendo capturados mas não há condições favoráveis
+                
+                **O sistema está funcionando corretamente se:**
+                - Há capturas de dados recentes (acima)
+                - O status do mercado está correto
+                """)
+            
+            # Seção de Análise Detalhada de Propostas
+            st.divider()
+            st.subheader("🔍 Análise Detalhada de Propostas")
+            
+            # Buscar análise detalhada
+            analysis_data = get_daytrade_analysis(days=1)
+            
+            if analysis_data and analysis_data.get('status') == 'success':
+                analysis = analysis_data.get('analysis', {})
+                
+                col_ana1, col_ana2, col_ana3 = st.columns(3)
+                
+                with col_ana1:
+                    st.metric("Total Geradas", analysis.get('total_proposals', 0))
+                
+                with col_ana2:
+                    approved = len(analysis.get('proposals_approved', []))
+                    st.metric("✅ Aprovadas", approved, delta=None)
+                
+                with col_ana3:
+                    rejected = len(analysis.get('proposals_rejected', []))
+                    st.metric("❌ Rejeitadas", rejected, delta=None)
+                
+                # Motivos de rejeição
+                rejection_reasons = analysis.get('rejection_reasons', {})
+                if rejection_reasons:
+                    st.subheader("📊 Motivos de Rejeição")
+                    reasons_df = pd.DataFrame([
+                        {'Motivo': k, 'Quantidade': v}
+                        for k, v in rejection_reasons.items()
+                    ])
+                    reasons_df = reasons_df.sort_values('Quantidade', ascending=False)
+                    
+                    # Gráfico de barras
+                    fig_reasons = px.bar(
+                        reasons_df,
+                        x='Motivo',
+                        y='Quantidade',
+                        title="Distribuição de Motivos de Rejeição",
+                        color='Quantidade',
+                        color_continuous_scale='Reds'
+                    )
+                    fig_reasons.update_layout(height=400)
+                    st.plotly_chart(fig_reasons, use_container_width=True)
+                    
+                    # Tabela detalhada
+                    st.dataframe(reasons_df, use_container_width=True, hide_index=True)
+                
+                # Propostas Rejeitadas (detalhes)
+                rejected_proposals = analysis.get('proposals_rejected', [])
+                if rejected_proposals:
+                    st.subheader("❌ Propostas Rejeitadas (Últimas 20)")
+                    rejected_data = []
+                    for prop in rejected_proposals[:20]:
+                        rejected_data.append({
+                            'Proposta ID': prop.get('proposal_id', 'N/A')[:30],
+                            'Símbolo': prop.get('symbol', 'N/A'),
+                            'Motivo': prop.get('reason', 'N/A')[:100],
+                            'Timestamp': prop.get('timestamp', 'N/A')[:19] if prop.get('timestamp') else 'N/A'
+                        })
+                    
+                    if rejected_data:
+                        rejected_df = pd.DataFrame(rejected_data)
+                        st.dataframe(rejected_df, use_container_width=True, hide_index=True)
+                
+                # Propostas Aprovadas (detalhes)
+                approved_proposals = analysis.get('proposals_approved', [])
+                if approved_proposals:
+                    st.subheader("✅ Propostas Aprovadas (Últimas 20)")
+                    approved_data = []
+                    for prop in approved_proposals[:20]:
+                        metadata = prop.get('metadata', {})
+                        approved_data.append({
+                            'Proposta ID': prop.get('proposal_id', 'N/A')[:30],
+                            'Símbolo': prop.get('symbol', 'N/A'),
+                            'Delta': metadata.get('delta', 'N/A'),
+                            'DTE': metadata.get('days_to_expiry', 'N/A'),
+                            'Intraday Return': f"{metadata.get('intraday_return', 0)*100:.2f}%" if metadata.get('intraday_return') else 'N/A',
+                            'Volume Ratio': f"{metadata.get('volume_ratio', 0):.2f}" if metadata.get('volume_ratio') else 'N/A',
+                            'Timestamp': prop.get('timestamp', 'N/A')[:19] if prop.get('timestamp') else 'N/A'
+                        })
+                    
+                    if approved_data:
+                        approved_df = pd.DataFrame(approved_data)
+                        st.dataframe(approved_df, use_container_width=True, hide_index=True)
+                
+                # Diagnóstico: Por que não há propostas?
+                if analysis.get('total_proposals', 0) == 0:
+                    st.warning("""
+                    ⚠️ **Nenhuma proposta gerada no período analisado**
+                    
+                    **Possíveis causas:**
+                    1. **Critérios muito restritivos:**
+                       - `min_intraday_return`: 0.5% (muito alto?)
+                       - `min_volume_ratio`: 0.25 (muito alto?)
+                       - `delta_min`: 0.20, `delta_max`: 0.60 (muito restritivo?)
+                       - `max_dte`: 7 dias (muito curto?)
+                       - `max_spread_pct`: 5% (muito baixo?)
+                    
+                    2. **Mercado não atende aos critérios:**
+                       - Baixa volatilidade
+                       - Baixo volume
+                       - Opções com spread muito alto
+                    
+                    3. **Dados não estão sendo capturados corretamente**
+                    
+                    **Como diagnosticar:**
+                    - Execute: `python diagnosticar_captura.py`
+                    - Verifique os logs em `logs/`
+                    - Considere reduzir os critérios em `config.json`
+                    """)
+        
         else:
-            st.info("Nenhum dado de portfólio disponível. Execute um backtest primeiro.")
+            st.error("❌ **Erro ao processar dados**")
+            st.write(f"Status recebido: {monitoring_data.get('status', 'unknown')}")
+            if monitoring_data.get('message'):
+                st.write(f"**Mensagem:** {monitoring_data['message']}")
+            st.info("💡 **Solução:** Verifique se a API está rodando: `python api_server.py`")
+        
+        # Auto-refresh no final (após mostrar todos os dados)
+        if auto_refresh:
+            time.sleep(3)
+            st.rerun()
     
-    # TAB 5: Backtest
+    # TAB 5: Portfólio
     with tab5:
+        st.header("💼 Portfólio - Posições Abertas")
+        
+        # Mostrar status de carregamento
+        with st.spinner("Carregando dados do portfólio..."):
+            portfolio_data = get_portfolio_positions()
+        
+        # Diagnóstico se não houver dados
+        if not portfolio_data:
+            st.error("❌ **Erro ao carregar dados do portfólio**")
+            st.info("""
+            **Possíveis causas:**
+            1. API não está rodando - Execute: `python api_server.py`
+            2. Banco de dados não inicializado
+            3. Erro de conexão com a API
+            
+            **Como verificar:**
+            - Verifique se a API está respondendo em http://localhost:5000
+            - Execute: `python testar_endpoint_daytrade.py` para diagnóstico
+            """)
+            st.stop()
+        
+        if portfolio_data.get('status') == 'error':
+            st.error(f"❌ **Erro na API:** {portfolio_data.get('message', 'Erro desconhecido')}")
+            st.info("💡 **Solução:** Verifique se a API está rodando: `python api_server.py`")
+            st.stop()
+        
+        if portfolio_data.get('status') == 'success':
+            positions = portfolio_data.get('positions', [])
+            total_positions = portfolio_data.get('total_positions', 0)
+            total_unrealized_pnl = portfolio_data.get('total_unrealized_pnl', 0.0)
+            total_delta = portfolio_data.get('total_delta', 0.0)
+            total_gamma = portfolio_data.get('total_gamma', 0.0)
+            total_vega = portfolio_data.get('total_vega', 0.0)
+            
+            # Métricas gerais
+            col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+            
+            with col_p1:
+                st.metric("Posições Abertas", total_positions)
+            
+            with col_p2:
+                pnl_color = "normal" if total_unrealized_pnl >= 0 else "inverse"
+                st.metric("PnL Não Realizado", f"R$ {total_unrealized_pnl:,.2f}", delta=None)
+            
+            with col_p3:
+                st.metric("Delta Total", f"{total_delta:.2f}")
+            
+            with col_p4:
+                st.metric("Gamma Total", f"{total_gamma:.2f}")
+            
+            with col_p5:
+                st.metric("Vega Total", f"{total_vega:.2f}")
+            
+            st.divider()
+            
+            if positions and len(positions) > 0:
+                # Criar DataFrame para exibição
+                df_positions = pd.DataFrame(positions)
+                
+                # Selecionar colunas relevantes
+                display_cols = []
+                for col in ['symbol', 'side', 'quantity', 'avg_price', 'current_price', 
+                           'unrealized_pnl', 'delta', 'gamma', 'vega', 'opened_at']:
+                    if col in df_positions.columns:
+                        display_cols.append(col)
+                
+                if display_cols:
+                    # Formatar valores numéricos
+                    display_df = df_positions[display_cols].copy()
+                    
+                    # Formatar colunas numéricas
+                    if 'quantity' in display_df.columns:
+                        display_df['quantity'] = display_df['quantity'].apply(lambda x: f"{x:.2f}")
+                    if 'avg_price' in display_df.columns:
+                        display_df['avg_price'] = display_df['avg_price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                    if 'current_price' in display_df.columns:
+                        display_df['current_price'] = display_df['current_price'].apply(lambda x: f"R$ {x:.2f}" if pd.notna(x) else "N/A")
+                    if 'unrealized_pnl' in display_df.columns:
+                        display_df['unrealized_pnl'] = display_df['unrealized_pnl'].apply(lambda x: f"R$ {x:,.2f}" if pd.notna(x) else "R$ 0.00")
+                    if 'delta' in display_df.columns:
+                        display_df['delta'] = display_df['delta'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
+                    if 'gamma' in display_df.columns:
+                        display_df['gamma'] = display_df['gamma'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
+                    if 'vega' in display_df.columns:
+                        display_df['vega'] = display_df['vega'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
+                    
+                    st.subheader("📋 Detalhes das Posições")
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    # Gráfico de PnL por posição
+                    if 'symbol' in df_positions.columns and 'unrealized_pnl' in df_positions.columns:
+                        fig_pnl = px.bar(
+                            df_positions,
+                            x='symbol',
+                            y='unrealized_pnl',
+                            title="PnL Não Realizado por Posição",
+                            labels={'symbol': 'Símbolo', 'unrealized_pnl': 'PnL (R$)'},
+                            color='unrealized_pnl',
+                            color_continuous_scale=['red', 'green'] if total_unrealized_pnl < 0 else ['green', 'red']
+                        )
+                        fig_pnl.update_layout(showlegend=False)
+                        st.plotly_chart(fig_pnl, use_container_width=True)
+                else:
+                    st.info("Nenhuma coluna disponível para exibir.")
+            else:
+                st.info("💼 **Nenhuma posição aberta no momento.**")
+                st.caption("💡 **Dica:** Posições aparecerão aqui quando houver ordens executadas e abertas")
+    
+    # TAB 6: Backtest
+    with tab6:
         st.header("📈 Backtest e Métricas")
         
         metrics_data = get_metrics()
@@ -921,8 +1551,8 @@ def main():
         else:
             st.info("Nenhuma métrica disponível. Execute um backtest primeiro.")
     
-    # TAB 6: Ações Monitoradas
-    with tab6:
+    # TAB 7: Ações Monitoradas
+    with tab7:
         st.header("📋 Ações Monitoradas")
         st.info(f"Total de {len(TICKERS_MONITORADOS)} ações sendo monitoradas pelos agentes")
         
@@ -956,8 +1586,8 @@ def main():
         O sistema monitora essas ações continuamente e gera propostas quando encontra oportunidades.
         """)
     
-    # TAB 7: Log de Monitoramento
-    with tab7:
+    # TAB 8: Log de Monitoramento
+    with tab8:
         st.header("📝 Log de Monitoramento em Tempo Real")
         
         # Status do monitoramento
@@ -1236,6 +1866,7 @@ def main():
                     st.markdown(f"{icon} **[{timestamp[:19]}]** {event_type}: {log_entry.get('proposal_id', log_entry.get('order_id', 'N/A'))}")
         else:
             st.info("Nenhum log disponível. Execute um backtest ou inicie o monitoramento.")
+    
 
 if __name__ == '__main__':
     main()

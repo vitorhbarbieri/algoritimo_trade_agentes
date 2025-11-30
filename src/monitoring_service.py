@@ -201,13 +201,17 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
         
         # Verificar se está no horário de trading (inclui pré-mercado)
         trading_status = self.trading_schedule.get_trading_status()
-        if trading_status == 'CLOSED':
-            return {
-                'timestamp': b3_time.isoformat(),
-                'status': 'MARKET_CLOSED',
-                'opportunities': 0,
-                'proposals': 0
-            }
+        
+        # IMPORTANTE: Mesmo quando mercado está fechado, devemos capturar dados
+        # para análise posterior e rastreabilidade. Apenas não geramos propostas.
+        # Se for fim de semana ou feriado, ainda assim tentamos capturar dados históricos.
+        
+        # Se for dia útil mas fora do horário, ainda capturamos dados (pós-mercado)
+        # Se não for dia útil, ainda tentamos capturar dados históricos
+        should_capture_data = True  # Sempre tentar capturar dados
+        
+        # Só gerar propostas durante horário de trading
+        should_generate_proposals = trading_status in ['PRE_MARKET', 'TRADING', 'POST_MARKET']
         
         # Enviar notificação de status a cada 2 horas (apenas durante trading)
         if trading_status == 'TRADING' and (self.last_status_notification is None or \
@@ -240,63 +244,183 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                 raise
             
             # Buscar dados spot INTRADAY para cada ticker
-            tickers_to_process = tickers[:20]  # Limitar a 20 para não demorar muito
+            tickers_to_process = tickers[:30]  # Processar todos os tickers configurados
             successful_tickers = 0
+            failed_tickers = []
+            
+            logger.info(f"Processando {len(tickers_to_process)} tickers...")
             
             for ticker in tickers_to_process:
                 try:
                     ticker_yf = ticker
-                    stock = yf.Ticker(ticker_yf)
                     
-                    # Buscar dados intraday do dia atual
-                    hist_intraday = None
-                    try:
-                        # Tentar dados intraday (5m) - mais confiável que 1m
-                        hist_intraday = stock.history(period='1d', interval='5m', timeout=10)
-                    except:
-                        try:
-                            # Fallback: tentar 15m
-                            hist_intraday = stock.history(period='1d', interval='15m', timeout=10)
-                        except:
-                            try:
-                                # Fallback: tentar 1h
-                                hist_intraday = stock.history(period='1d', interval='1h', timeout=10)
-                            except:
-                                # Último fallback: dados diários dos últimos 5 dias
-                                hist_intraday = stock.history(period='5d', interval='1d', timeout=10)
+                    # Para ações brasileiras (.SA), usar info() para dados em tempo real
+                    # Para outras ações, tentar intraday primeiro
+                    is_brazilian = '.SA' in ticker
                     
-                    if hist_intraday is None or hist_intraday.empty:
-                        logger.debug(f"Nenhum dado encontrado para {ticker}")
-                        continue
+                    current_price = None
+                    open_price = None
+                    high_price = None
+                    low_price = None
+                    volume_today = 0
                     
-                    # Pegar dados mais recentes
-                    latest = hist_intraday.iloc[-1]
-                    
-                    # Determinar preço de abertura do dia
-                    # Se tiver múltiplos períodos, pegar o primeiro do dia
-                    if len(hist_intraday) > 1:
-                        # Pegar o primeiro registro (mais antigo)
-                        first_of_day = hist_intraday.iloc[0]
-                        open_price = float(first_of_day['Open'])
+                    if is_brazilian:
+                        # Para ações brasileiras, buscar dados INTRADAY do dia atual
+                        stock = yf.Ticker(ticker_yf)
+                        hist_intraday = None
+                        today = datetime.now().date()
+                        is_market_open = trading_status in ['PRE_MARKET', 'TRADING', 'POST_MARKET']
                         
-                        # Calcular volume total do dia (soma de todos os períodos)
-                        volume_today = int(hist_intraday['Volume'].sum()) if 'Volume' in hist_intraday.columns else 0
+                        # Tentar buscar dados intraday do dia atual (5m, 15m, 1h)
+                        for interval in ['5m', '15m', '1h']:
+                            try:
+                                hist_intraday = stock.history(period='1d', interval=interval, timeout=10)
+                                if hist_intraday is not None and not hist_intraday.empty:
+                                    # Converter índice para datetime se necessário
+                                    hist_intraday.index = pd.to_datetime(hist_intraday.index)
+                                    
+                                    # Filtrar apenas dados de HOJE
+                                    hist_today = hist_intraday[hist_intraday.index.date == today]
+                                    
+                                    if not hist_today.empty:
+                                        # Usar último candle disponível de HOJE (mais recente)
+                                        latest = hist_today.iloc[-1]
+                                        current_price = float(latest['Close'])
+                                        open_price = float(hist_today.iloc[0]['Open'])
+                                        high_price = float(hist_today['High'].max())
+                                        low_price = float(hist_today['Low'].min())
+                                        volume_today = int(hist_today['Volume'].sum())
+                                        logger.info(f"{ticker}: ✅ Dados intraday de HOJE capturados ({interval}, {len(hist_today)} candles) - Preço: {current_price:.2f}")
+                                        break
+                                    elif is_market_open:
+                                        # Se mercado está aberto mas não há dados de hoje, pode ser delay da API
+                                        # Usar último candle disponível (pode ser do início do pregão)
+                                        latest = hist_intraday.iloc[-1]
+                                        candle_date = hist_intraday.index[-1].date()
+                                        current_price = float(latest['Close'])
+                                        open_price = float(hist_intraday.iloc[0]['Open'])
+                                        high_price = float(hist_intraday['High'].max())
+                                        low_price = float(hist_intraday['Low'].min())
+                                        volume_today = int(hist_intraday['Volume'].sum())
+                                        logger.warning(f"{ticker}: ⚠️ Mercado aberto mas último candle é de {candle_date} (pode ser delay da API) - Preço: {current_price:.2f}")
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Erro ao buscar intraday {interval} para {ticker}: {e}")
+                                continue
+                        
+                        # Se não conseguiu intraday, tentar info() para dados em tempo real
+                        if current_price is None:
+                            try:
+                                info = stock.info
+                                # Pegar preço atual do info (mais atualizado)
+                                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+                                if current_price:
+                                    open_price = info.get('open') or info.get('regularMarketOpen') or current_price
+                                    high_price = info.get('dayHigh') or info.get('regularMarketDayHigh') or current_price
+                                    low_price = info.get('dayLow') or info.get('regularMarketDayLow') or current_price
+                                    volume_today = info.get('volume') or info.get('regularMarketVolume') or 0
+                                    logger.info(f"{ticker}: ✅ Dados obtidos via info() - Preço atual: {current_price:.2f}")
+                            except Exception as e:
+                                logger.debug(f"Erro ao buscar info para {ticker}: {e}")
+                                # Último fallback: dados diários (apenas se mercado fechado)
+                                if not is_market_open:
+                                    try:
+                                        hist_daily = stock.history(period='2d', interval='1d', timeout=10)
+                                        if hist_daily is not None and not hist_daily.empty:
+                                            latest = hist_daily.iloc[-1]
+                                            current_price = float(latest['Close'])
+                                            open_price = float(hist_daily.iloc[0]['Open']) if len(hist_daily) > 1 else float(latest['Open'])
+                                            high_price = float(latest['High'])
+                                            low_price = float(latest['Low'])
+                                            volume_today = int(hist_daily['Volume'].sum()) if 'Volume' in hist_daily.columns else 0
+                                            logger.info(f"{ticker}: ℹ️ Mercado fechado - usando último preço de fechamento: {current_price:.2f}")
+                                    except:
+                                        pass
+                                else:
+                                    logger.warning(f"{ticker}: ⚠️ Mercado aberto mas não foi possível obter dados atualizados")
                     else:
-                        # Se só tiver um registro, usar ele
-                        open_price = float(latest['Open'])
-                        volume_today = int(latest['Volume']) if not pd.isna(latest['Volume']) else 0
+                        # Para ações não-brasileiras, buscar dados INTRADAY do dia atual
+                        stock = yf.Ticker(ticker_yf)
+                        hist_intraday = None
+                        today = datetime.now().date()
+                        is_market_open = trading_status in ['PRE_MARKET', 'TRADING', 'POST_MARKET']
+                        
+                        # Tentar buscar dados intraday do dia atual (5m, 15m, 1h)
+                        for interval in ['5m', '15m', '1h']:
+                            try:
+                                hist_intraday = stock.history(period='1d', interval=interval, timeout=10)
+                                if hist_intraday is not None and not hist_intraday.empty:
+                                    # Converter índice para datetime se necessário
+                                    hist_intraday.index = pd.to_datetime(hist_intraday.index)
+                                    
+                                    # Filtrar apenas dados de HOJE
+                                    hist_today = hist_intraday[hist_intraday.index.date == today]
+                                    
+                                    if not hist_today.empty:
+                                        # Usar último candle disponível de HOJE (mais recente)
+                                        latest = hist_today.iloc[-1]
+                                        current_price = float(latest['Close'])
+                                        open_price = float(hist_today.iloc[0]['Open'])
+                                        high_price = float(hist_today['High'].max())
+                                        low_price = float(hist_today['Low'].min())
+                                        volume_today = int(hist_today['Volume'].sum())
+                                        logger.info(f"{ticker}: ✅ Dados intraday de HOJE capturados ({interval}, {len(hist_today)} candles) - Preço: {current_price:.2f}")
+                                        break
+                                    elif is_market_open:
+                                        # Se mercado está aberto mas não há dados de hoje, pode ser delay da API
+                                        latest = hist_intraday.iloc[-1]
+                                        candle_date = hist_intraday.index[-1].date()
+                                        current_price = float(latest['Close'])
+                                        open_price = float(hist_intraday.iloc[0]['Open'])
+                                        high_price = float(hist_intraday['High'].max())
+                                        low_price = float(hist_intraday['Low'].min())
+                                        volume_today = int(hist_intraday['Volume'].sum())
+                                        logger.warning(f"{ticker}: ⚠️ Mercado aberto mas último candle é de {candle_date} (pode ser delay da API) - Preço: {current_price:.2f}")
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Erro ao buscar intraday {interval} para {ticker}: {e}")
+                                continue
+                        
+                        # Se não conseguiu intraday de hoje, tentar dados diários como fallback
+                        if current_price is None:
+                            if not is_market_open:
+                                # Se mercado fechado, usar dados diários é aceitável
+                                try:
+                                    hist_daily = stock.history(period='2d', interval='1d', timeout=10)
+                                    if hist_daily is not None and not hist_daily.empty:
+                                        latest = hist_daily.iloc[-1]
+                                        current_price = float(latest['Close'])
+                                        open_price = float(hist_daily.iloc[0]['Open']) if len(hist_daily) > 1 else float(latest['Open'])
+                                        high_price = float(latest['High'])
+                                        low_price = float(latest['Low'])
+                                        volume_today = int(hist_daily['Volume'].sum()) if 'Volume' in hist_daily.columns else 0
+                                        logger.info(f"{ticker}: ℹ️ Mercado fechado - usando último preço de fechamento: {current_price:.2f}")
+                                except Exception as e:
+                                    logger.debug(f"Erro ao buscar dados diários para {ticker}: {e}")
+                            else:
+                                logger.warning(f"{ticker}: ⚠️ Mercado aberto mas não foi possível obter dados atualizados")
+                        
+                        if current_price is None:
+                            logger.warning(f"Nenhum dado encontrado para {ticker}")
+                            failed_tickers.append(ticker)
+                            continue
                     
-                    current_price = float(latest['Close'])
+                    if current_price is None:
+                        logger.warning(f"Não foi possível obter preço atual para {ticker}")
+                        failed_tickers.append(ticker)
+                        continue
                     
                     market_data['spot'][ticker] = {
                         'open': open_price,
                         'close': current_price,
                         'last': current_price,  # Preço atual
-                        'high': float(latest['High']),
-                        'low': float(latest['Low']),
+                        'high': high_price,
+                        'low': low_price,
                         'volume': volume_today,
                         'adv': 0  # Será calculado depois se necessário
                     }
+                    
+                    logger.debug(f"{ticker}: Preço atual={current_price:.2f}, Abertura={open_price:.2f}, Volume={volume_today:,}")
                     
                     successful_tickers += 1
                     
@@ -314,15 +438,22 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                     
                 except Exception as e:
                     logger.warning(f"Erro ao buscar dados para {ticker}: {e}")
+                    failed_tickers.append(ticker)
                     import traceback
                     logger.debug(traceback.format_exc())
                     continue
             
+            # Log resumo
+            if failed_tickers:
+                logger.warning(f"Tickers com falha ({len(failed_tickers)}): {failed_tickers[:5]}")
+            
             logger.info(f"Dados coletados: {successful_tickers}/{len(tickers_to_process)} tickers com dados spot")
             logger.info(f"Opções disponíveis para: {len(market_data.get('options', {}))} tickers")
             
-            # Salvar dados capturados no banco para rastreabilidade
+            # CRÍTICO: Salvar dados capturados SEMPRE, mesmo quando mercado fechado
+            # Isso garante rastreabilidade e análise posterior
             if self.orders_repo and market_data.get('spot'):
+                saved_count = 0
                 for ticker, spot_info in market_data['spot'].items():
                     try:
                         options_list = market_data.get('options', {}).get(ticker, [])
@@ -331,16 +462,22 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                             data_type='spot',
                             spot_data=spot_info,
                             options_data=options_list if options_list else None,
-                            raw_data={'timestamp': b3_time.isoformat()},
+                            raw_data={'timestamp': b3_time.isoformat(), 'trading_status': trading_status},
                             source='real'
                         )
+                        saved_count += 1
                     except Exception as save_err:
-                        logger.debug(f"Erro ao salvar dados de mercado para {ticker}: {save_err}")
+                        logger.error(f"Erro ao salvar dados de mercado para {ticker}: {save_err}")
+                        import traceback
+                        logger.debug(traceback.format_exc())
+                
+                if saved_count > 0:
+                    logger.info(f"Dados salvos no banco: {saved_count} tickers")
             
-            # CRÍTICO: Gerar propostas SEMPRE que houver dados, não apenas se MarketMonitor encontrar oportunidades
-            # O DayTradeOptionsStrategy analisa os dados diretamente
+            # CRÍTICO: Gerar propostas APENAS durante horário de trading
+            # Mas sempre capturamos dados para rastreabilidade
             proposals = []
-            if market_data['spot']:
+            if should_generate_proposals and market_data['spot']:
                 # Gerar propostas do TraderAgent (inclui DayTradeOptionsStrategy)
                 proposals = self.trader_agent.generate_proposals(
                     pd.to_datetime(datetime.now()),
@@ -402,7 +539,11 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                                 self.notifier.notify_opportunity(opportunity_data)
             else:
                 opportunities = []
-                logger.warning("Nenhum dado spot coletado")
+                if successful_tickers == 0:
+                    logger.warning(f"Nenhum dado spot coletado após processar {len(tickers_to_process)} tickers")
+                    logger.warning("Possíveis causas: mercado fechado, problemas com API, ou tickers inválidos")
+                else:
+                    logger.info(f"Dados coletados ({successful_tickers} tickers) mas sem propostas geradas (mercado fechado ou sem oportunidades)")
             
             # Buscar dados de cripto (se habilitado)
             if self.crypto_api:
@@ -417,10 +558,10 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
             self.notifier.notify_error(
                 error_type='Market Scan Error',
                 error_message=str(e),
-                details={'timestamp': datetime.now().isoformat()}
+                details={'timestamp': self.trading_schedule.get_current_b3_time().isoformat()}
             )
         
-        self.last_scan_time = datetime.now()
+        self.last_scan_time = self.trading_schedule.get_current_b3_time()
         self.opportunities_found = opportunities[:10] if 'opportunities' in locals() else []
         self.proposals_generated = proposals
         
@@ -430,13 +571,17 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
             for p in proposals[:3]:
                 logger.info(f"  Proposta: {p.strategy} - {p.symbol} - Qty: {p.quantity}")
         
+        # Incluir informações sobre captura de dados no retorno
+        data_captured = successful_tickers if 'successful_tickers' in locals() else 0
         return {
             'timestamp': self.last_scan_time.isoformat(),
             'status': trading_status,
             'opportunities': len(opportunities) if 'opportunities' in locals() else 0,
             'proposals': len(proposals),
             'opportunities_list': opportunities[:5] if 'opportunities' in locals() else [],
-            'proposals_list': [{'id': p.proposal_id, 'strategy': p.strategy, 'symbol': p.symbol} for p in proposals[:5]]
+            'proposals_list': [{'id': p.proposal_id, 'strategy': p.strategy, 'symbol': p.symbol} for p in proposals[:5]],
+            'data_captured': data_captured,
+            'should_generate_proposals': should_generate_proposals if 'should_generate_proposals' in locals() else False
         }
     
     def start_monitoring(self, interval_seconds: int = 300):
@@ -453,30 +598,51 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                     b3_time = self.trading_schedule.get_current_b3_time()
                     status = self.trading_schedule.get_trading_status()
                     
-                    # Se não for dia útil ou fora do horário, aguardar
+                    # CRÍTICO: Sempre executar scan, mesmo quando mercado fechado
+                    # Isso garante captura de dados históricos e rastreabilidade
+                    # Apenas não geramos propostas quando fechado
+                    
+                    logger.info(f"[{b3_time.strftime('%H:%M:%S')}] Status: {status} - Executando scan...")
+                    
+                    # Escanear mercado (SEMPRE, mesmo fechado)
+                    try:
+                        result = self.scan_market()
+                        status_msg = result.get('status', 'UNKNOWN')
+                        data_captured = result.get('data_captured', 0)
+                        proposals = result.get('proposals', 0)
+                        opportunities = result.get('opportunities', 0)
+                        
+                        logger.info(f"Scan completo ({status_msg}): {data_captured} dados capturados, {opportunities} oportunidades, {proposals} propostas")
+                        
+                        # Log detalhado se houver dados capturados
+                        if data_captured > 0:
+                            logger.info(f"✅ Dados salvos no banco: {data_captured} tickers")
+                        else:
+                            logger.warning(f"⚠️  Nenhum dado capturado neste scan")
+                            
+                    except Exception as scan_err:
+                        logger.error(f"❌ ERRO ao executar scan: {scan_err}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                    
+                    # Se mercado fechado, aguardar antes do próximo scan
                     if status == 'CLOSED':
-                        # Aguardar até próximo dia útil
+                        # Aguardar até próximo dia útil (máximo 1 hora para verificar novamente)
                         next_open = self.trading_schedule.get_next_trading_open()
                         if next_open:
                             wait_seconds = (next_open - b3_time).total_seconds()
-                            logger.info(f"Mercado fechado. Próxima abertura: {next_open.strftime('%d/%m/%Y %H:%M')}")
-                            # Aguardar até próximo dia útil (máximo 1 hora para verificar novamente)
+                            wait_minutes = int(wait_seconds / 60)
+                            logger.info(f"Mercado fechado. Próxima abertura: {next_open.strftime('%d/%m/%Y %H:%M')} (aguardando {wait_minutes} minutos)")
                             time.sleep(min(wait_seconds, 3600))
                         else:
-                            time.sleep(3600)  # Aguardar 1 hora
-                        continue
+                            logger.info("Mercado fechado. Aguardando 1 hora...")
+                            time.sleep(3600)
+                    else:
+                        # Durante trading, aguardar intervalo normal
+                        logger.debug(f"Aguardando {interval_seconds}s até próximo scan...")
+                        time.sleep(interval_seconds)
                     
-                    # Escanear mercado
-                    result = self.scan_market()
-                    status_msg = result.get('status', 'UNKNOWN')
-                    logger.info(f"Scan completo ({status_msg}): {result.get('opportunities', 0)} oportunidades, {result.get('proposals', 0)} propostas")
-                    
-                    # Log detalhado se houver propostas
-                    if result.get('proposals', 0) > 0:
-                        logger.info(f"  Propostas geradas: {[p['strategy'] for p in result.get('proposals_list', [])]}")
-                    
-                    # Intervalo entre scans
-                    time.sleep(interval_seconds)
+                    # Log detalhado se houver propostas (já movido para cima)
                 except Exception as e:
                     logger.error(f"Erro no loop de monitoramento: {e}")
                     time.sleep(60)  # Esperar 1 minuto antes de tentar novamente

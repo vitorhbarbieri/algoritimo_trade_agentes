@@ -11,6 +11,14 @@ from typing import Dict, List, Optional
 from contextlib import contextmanager
 import pandas as pd
 import logging
+import pytz
+
+# Timezone de São Paulo (B3)
+B3_TIMEZONE = pytz.timezone('America/Sao_Paulo')
+
+def get_b3_timestamp() -> str:
+    """Retorna timestamp atual no timezone de São Paulo (B3)."""
+    return datetime.now(B3_TIMEZONE).isoformat()
 
 logger = logging.getLogger(__name__)
 
@@ -199,16 +207,18 @@ class OrdersRepository:
     def save_proposal(self, proposal: Dict) -> bool:
         """Salva uma proposta gerada pelo TraderAgent."""
         try:
+            created_at_b3 = get_b3_timestamp()
+            
             with _connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT OR REPLACE INTO proposals 
                     (proposal_id, timestamp, strategy, instrument_type, symbol, 
-                     side, quantity, price, order_type, metadata, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     side, quantity, price, order_type, metadata, source, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     proposal.get('proposal_id'),
-                    proposal.get('timestamp', datetime.now().isoformat()),
+                    proposal.get('timestamp', get_b3_timestamp()),
                     proposal.get('strategy', 'unknown'),
                     proposal.get('instrument_type', 'unknown'),
                     proposal.get('symbol', ''),
@@ -217,7 +227,8 @@ class OrdersRepository:
                     proposal.get('price', 0),
                     proposal.get('order_type', 'LIMIT'),
                     json.dumps(proposal.get('metadata', {})),
-                    proposal.get('source', 'real')  # 'simulation' ou 'real'
+                    proposal.get('source', 'real'),  # 'simulation' ou 'real'
+                    created_at_b3
                 ))
                 return True
         except Exception as e:
@@ -227,22 +238,25 @@ class OrdersRepository:
     def save_risk_evaluation(self, evaluation: Dict) -> bool:
         """Salva avaliação do RiskAgent."""
         try:
+            created_at_b3 = get_b3_timestamp()
+            
             with _connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO risk_evaluations 
                     (proposal_id, timestamp, decision, reason, details, 
-                     modified_quantity, modified_price, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     modified_quantity, modified_price, source, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     evaluation.get('proposal_id'),
-                    evaluation.get('timestamp', datetime.now().isoformat()),
+                    evaluation.get('timestamp', get_b3_timestamp()),
                     evaluation.get('decision', 'REJECT'),
                     evaluation.get('reason', ''),
                     json.dumps(evaluation.get('details', {})),
                     evaluation.get('modified_quantity'),
                     evaluation.get('modified_price'),
-                    evaluation.get('source', 'real')  # 'simulation' ou 'real'
+                    evaluation.get('source', 'real'),  # 'simulation' ou 'real'
+                    created_at_b3
                 ))
                 return True
         except Exception as e:
@@ -252,18 +266,20 @@ class OrdersRepository:
     def save_execution(self, execution: Dict) -> bool:
         """Salva execução simulada."""
         try:
+            created_at_b3 = get_b3_timestamp()
+            
             with _connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT OR REPLACE INTO executions 
                     (order_id, proposal_id, timestamp, symbol, side, quantity, 
                      price, market_price, slippage, commission, notional, 
-                     total_cost, status, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     total_cost, status, source, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     execution.get('order_id') or execution.get('fill_id'),
                     execution.get('proposal_id', ''),
-                    execution.get('timestamp', datetime.now().isoformat()),
+                    execution.get('timestamp', get_b3_timestamp()),
                     execution.get('symbol', ''),
                     execution.get('side', 'BUY'),
                     execution.get('quantity', 0),
@@ -274,7 +290,8 @@ class OrdersRepository:
                     execution.get('notional', 0),
                     execution.get('total_cost', 0),
                     execution.get('status', 'FILLED'),
-                    execution.get('source', 'real')  # 'simulation' ou 'real'
+                    execution.get('source', 'real'),  # 'simulation' ou 'real'
+                    created_at_b3
                 ))
                 return True
         except Exception as e:
@@ -284,6 +301,8 @@ class OrdersRepository:
     def save_performance_snapshot(self, snapshot: Dict) -> bool:
         """Salva snapshot de performance (backtest em tempo real)."""
         try:
+            created_at_b3 = get_b3_timestamp()
+            
             with _connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -291,10 +310,10 @@ class OrdersRepository:
                     (timestamp, nav, total_pnl, daily_pnl, total_trades, 
                      winning_trades, losing_trades, open_positions, 
                      total_delta, total_gamma, total_vega, portfolio_value, 
-                     cash, details)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cash, details, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    snapshot.get('timestamp', datetime.now().isoformat()),
+                    snapshot.get('timestamp', get_b3_timestamp()),
                     snapshot.get('nav', 0),
                     snapshot.get('total_pnl', 0),
                     snapshot.get('daily_pnl', 0),
@@ -307,7 +326,8 @@ class OrdersRepository:
                     snapshot.get('total_vega', 0),
                     snapshot.get('portfolio_value', 0),
                     snapshot.get('cash', 0),
-                    json.dumps(snapshot.get('details', {}))
+                    json.dumps(snapshot.get('details', {})),
+                    created_at_b3
                 ))
                 return True
         except Exception as e:
@@ -421,7 +441,8 @@ class OrdersRepository:
     def save_market_data_capture(self, ticker: str, data_type: str, spot_data: Dict = None, options_data: List[Dict] = None, raw_data: Dict = None, source: str = 'real'):
         """Salva dados de mercado capturados para rastreabilidade."""
         try:
-            timestamp = datetime.now().isoformat()
+            # Usar timezone de São Paulo (B3)
+            timestamp = get_b3_timestamp()
             
             # Preparar dados
             open_price = spot_data.get('open') if spot_data else None
@@ -459,20 +480,23 @@ class OrdersRepository:
                 logger.warning(f"Erro ao serializar raw_data: {e}")
                 raw_json = None
             
+            # Usar created_at com timezone B3
+            created_at_b3 = get_b3_timestamp()
+            
             with _connect() as conn:
                 conn.execute("""
                     INSERT INTO market_data_captures 
                     (timestamp, ticker, data_type, open_price, high_price, low_price, close_price, 
-                     last_price, volume, adv, intraday_return, volume_ratio, options_data, raw_data, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_price, volume, adv, intraday_return, volume_ratio, options_data, raw_data, source, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     timestamp, ticker, data_type, open_price, high_price, low_price, close_price,
-                    last_price, volume, adv, intraday_return, volume_ratio, options_json, raw_json, source
+                    last_price, volume, adv, intraday_return, volume_ratio, options_json, raw_json, source, created_at_b3
                 ))
         except Exception as e:
             logger.error(f"Erro ao salvar captura de dados de mercado: {e}")
     
-    def get_market_data_captures(self, ticker: str = None, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    def get_market_data_captures(self, ticker: str = None, start_date: str = None, end_date: str = None, limit: int = None) -> pd.DataFrame:
         """Busca dados de mercado capturados."""
         try:
             with _connect() as conn:
@@ -493,6 +517,9 @@ class OrdersRepository:
                 
                 query += " ORDER BY timestamp DESC"
                 
+                if limit:
+                    query += f" LIMIT {limit}"
+                
                 df = pd.read_sql_query(query, conn, params=params)
                 
                 # Parse JSON fields
@@ -511,7 +538,7 @@ class OrdersRepository:
                           vega: float = 0, unrealized_pnl: float = 0):
         """Salva ou atualiza posição aberta."""
         try:
-            timestamp = datetime.now().isoformat()
+            timestamp = get_b3_timestamp()
             
             # Calcular PnL não realizado se não fornecido
             if unrealized_pnl == 0 and current_price:
