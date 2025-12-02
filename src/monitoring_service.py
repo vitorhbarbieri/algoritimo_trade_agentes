@@ -14,7 +14,7 @@ try:
     from .data_loader import DataLoader
     from .market_data_api import create_market_data_api
     from .crypto_api import create_crypto_api
-    from .agents import TraderAgent
+    from .agents import TraderAgent, RiskAgent, PortfolioManager
     from .utils import StructuredLogger
     from .notifications import UnifiedNotifier
     from .orders_repository import OrdersRepository
@@ -24,7 +24,7 @@ except ImportError:
     from data_loader import DataLoader
     from market_data_api import create_market_data_api
     from crypto_api import create_crypto_api
-    from agents import TraderAgent
+    from agents import TraderAgent, RiskAgent, PortfolioManager
     from utils import StructuredLogger
     from notifications import UnifiedNotifier
     from orders_repository import OrdersRepository
@@ -41,7 +41,9 @@ class MonitoringService:
         self.logger = StructuredLogger(log_dir='logs')
         self.orders_repo = OrdersRepository()  # Repositório para salvar ordens
         self.market_monitor = MarketMonitor(config)
+        self.portfolio_manager = PortfolioManager(config.get('nav', 1000000))
         self.trader_agent = TraderAgent(config, self.logger, orders_repo=self.orders_repo)
+        self.risk_agent = RiskAgent(self.portfolio_manager, config, self.logger, orders_repo=self.orders_repo)
         self.data_loader = DataLoader()
         self.notifier = UnifiedNotifier(config)  # Sistema unificado de notificações
         self.trading_schedule = TradingSchedule()  # Horário de funcionamento B3
@@ -73,8 +75,18 @@ class MonitoringService:
     def _send_start_notification(self):
         """Envia notificação de início das atividades."""
         b3_time = self.trading_schedule.get_current_b3_time()
+        
+        # Buscar estatísticas do dia anterior (se houver)
+        yesterday = (b3_time - timedelta(days=1)).strftime('%Y-%m-%d')
+        summary_yesterday = None
+        if self.orders_repo:
+            try:
+                summary_yesterday = self.orders_repo.get_daily_summary(yesterday)
+            except:
+                pass
+        
         message = f"""
-🚀 *AGENTE DE DAYTRADE INICIADO*
+🚀 *MERCADO ABERTO - AGENTE INICIADO*
 
 *Horário:* {b3_time.strftime('%d/%m/%Y %H:%M:%S')} (B3)
 *Status:* {'Pré-Mercado' if self.trading_schedule.is_pre_market() else 'Mercado Aberto'}
@@ -86,9 +98,32 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
 • Trading: 10:00 - 17:00
 • Fechamento: 17:00
 
-Você receberá atualizações a cada 2 horas durante o pregão.
+*Notificações programadas:*
+• Status a cada 2 horas durante o pregão
+• Relatórios de saúde às 11:00 e 15:00
+• Resumo do dia ao fechamento
+
 """
-        self.notifier.send(message, title="🚀 Agente Iniciado", priority='high')
+        if summary_yesterday:
+            message += f"""
+*Resumo do dia anterior ({yesterday}):*
+• Propostas geradas: {summary_yesterday.get('proposals_count', 0)}
+• Propostas aprovadas: {summary_yesterday.get('approved_count', 0)}
+• Propostas rejeitadas: {summary_yesterday.get('rejected_count', 0)}
+"""
+        
+        # Enviar via Telegram
+        telegram_channel = None
+        for channel_name, channel in self.notifier.channels:
+            if channel_name == 'telegram':
+                telegram_channel = channel
+                break
+        
+        if telegram_channel:
+            telegram_channel.send(message)
+        else:
+            self.notifier.send(message, title="🚀 Mercado Aberto", priority='high')
+        
         self.day_start_time = b3_time
     
     def _send_end_notification(self):
@@ -108,21 +143,54 @@ Você receberá atualizações a cada 2 horas durante o pregão.
             minutes = (runtime_delta.seconds % 3600) // 60
             runtime = f"{hours}h {minutes}min"
         
+        # Buscar estatísticas detalhadas
+        proposals_count = summary.get('total_proposals', 0)
+        approved_count = summary.get('total_approved', 0)
+        rejected_count = summary.get('total_rejected', 0)
+        data_captures = 0
+        
+        if self.orders_repo:
+            try:
+                captures_df = self.orders_repo.get_market_data_captures(limit=1000)
+                if not captures_df.empty:
+                    today = b3_time.strftime('%Y-%m-%d')
+                    captures_today = captures_df[captures_df['created_at'].str.startswith(today)]
+                    data_captures = len(captures_today)
+            except:
+                pass
+        
         message = f"""
-🏁 *AGENTE DE DAYTRADE FINALIZADO*
+🏁 *MERCADO FECHADO - RESUMO DO DIA*
 
-*Horário:* {b3_time.strftime('%d/%m/%Y %H:%M:%S')} (B3)
+*Data:* {b3_time.strftime('%d/%m/%Y')}
+*Horário de fechamento:* {b3_time.strftime('%H:%M:%S')} (B3)
 *Tempo de operação:* {runtime if runtime else 'N/A'}
 
-*Resumo do Dia:*
-• Propostas geradas: {summary.get('total_proposals', 0)}
-• Propostas aprovadas: {summary.get('total_approved', 0)}
-• Propostas rejeitadas: {summary.get('total_rejected', 0)}
-• Execuções: {summary.get('total_executions', 0)}
+*📊 ESTATÍSTICAS DO DIA:*
+• Propostas geradas: {proposals_count}
+• Propostas aprovadas: {approved_count}
+• Propostas rejeitadas: {rejected_count}
+• Taxa de aprovação: {(approved_count/proposals_count*100) if proposals_count > 0 else 0:.1f}%
+• Capturas de dados: {data_captures}
 
-O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
+*⏰ PRÓXIMAS ATIVIDADES:*
+• Agente continuará monitorando dados mesmo com mercado fechado
+• Próxima abertura: {self.trading_schedule.get_next_trading_open().strftime('%d/%m/%Y %H:%M') if self.trading_schedule.get_next_trading_open() else 'N/A'}
+
+*✅ Agente permanece online e pronto para o próximo pregão.*
 """
-        self.notifier.send(message, title="🏁 Agente Finalizado", priority='normal')
+        
+        # Enviar via Telegram
+        telegram_channel = None
+        for channel_name, channel in self.notifier.channels:
+            if channel_name == 'telegram':
+                telegram_channel = channel
+                break
+        
+        if telegram_channel:
+            telegram_channel.send(message)
+        else:
+            self.notifier.send(message, title="🏁 Mercado Fechado", priority='normal')
         self.trading_started = False
         self.day_start_time = None
     
@@ -494,49 +562,73 @@ O agente encerrou as atividades do dia. Retomará amanhã às 09:45.
                     for opp in opportunities[:5]:
                         self.notifier.notify_opportunity(opp)
                 
-                # Enviar notificações de propostas importantes com botões de aprovação
+                # Avaliar propostas com RiskAgent antes de enviar
                 if proposals:
                     # Notificar sobre propostas de daytrade (alta prioridade)
                     daytrade_proposals = [p for p in proposals if p.strategy == 'daytrade_options']
                     if daytrade_proposals:
                         logger.info(f"Propostas de daytrade encontradas: {len(daytrade_proposals)}")
-                        for proposal in daytrade_proposals[:5]:  # Limitar a 5
-                            # Preparar dados da proposta para Telegram
-                            # Todas as informações já estão no metadata após padronização
-                            proposal_data = {
-                                'proposal_id': proposal.proposal_id,
-                                'symbol': proposal.symbol,
-                                'side': proposal.side,
-                                'quantity': proposal.quantity,
-                                'price': proposal.price,
-                                'metadata': proposal.metadata
-                            }
+                        
+                        # Filtrar propostas com razão ganho/perda aceitável (> 0.25)
+                        propostas_filtradas = []
+                        for proposal in daytrade_proposals:
+                            metadata = proposal.metadata or {}
+                            gain_value = metadata.get('gain_value', 0)
+                            loss_value = abs(metadata.get('loss_value', 1))
                             
-                            # Enviar via Telegram com botões de aprovação
-                            telegram_channel = None
-                            for channel_name, channel in self.notifier.channels:
-                                if channel_name == 'telegram' and hasattr(channel, 'send_proposal_with_approval'):
-                                    telegram_channel = channel
-                                    break
-                            
-                            if telegram_channel:
-                                telegram_channel.send_proposal_with_approval(proposal_data)
-                            else:
-                                # Fallback: enviar notificação normal
-                                opportunity_data = {
-                                    'type': 'daytrade_options',
-                                    'symbol': proposal.symbol,
-                                    'ticker': proposal.metadata.get('underlying', 'N/A'),
-                                    'opportunity_score': proposal.metadata.get('intraday_return', 0) * 100,
-                                    'proposal_id': proposal.proposal_id,
-                                    'strike': proposal.metadata.get('strike', 'N/A'),
-                                    'delta': proposal.metadata.get('delta', 0),
-                                    'intraday_return': proposal.metadata.get('intraday_return', 0),
-                                    'volume_ratio': proposal.metadata.get('volume_ratio', 0),
-                                    'expected_gain': expected_gain,
-                                    'expected_gain_pct': expected_gain_pct
-                                }
-                                self.notifier.notify_opportunity(opportunity_data)
+                            if loss_value > 0:
+                                gain_loss_ratio = gain_value / loss_value
+                                # Apenas propostas com razão ganho/perda > 0.25
+                                if gain_loss_ratio > 0.25:
+                                    propostas_filtradas.append(proposal)
+                        
+                        logger.info(f"Propostas após filtro de razão ganho/perda: {len(propostas_filtradas)}")
+                        
+                        # Avaliar com RiskAgent e enviar apenas as aprovadas
+                        approved_count = 0
+                        for proposal in propostas_filtradas[:10]:  # Limitar a 10 por scan
+                            try:
+                                # Avaliar proposta com RiskAgent
+                                decision, modified_proposal, reason = self.risk_agent.evaluate_proposal(
+                                    proposal, market_data
+                                )
+                                
+                                if decision == 'APPROVE':
+                                    approved_count += 1
+                                    
+                                    # Atualizar status para 'enviada' (aprovada pelo RiskAgent e enviada ao Telegram)
+                                    try:
+                                        self.orders_repo.update_proposal_status(proposal.proposal_id, 'enviada')
+                                    except Exception as e:
+                                        logger.error(f"Erro ao atualizar status da proposta {proposal.proposal_id}: {e}")
+                                    
+                                    # Preparar dados da proposta para Telegram
+                                    proposal_data = {
+                                        'proposal_id': proposal.proposal_id,
+                                        'symbol': proposal.symbol,
+                                        'side': proposal.side,
+                                        'quantity': proposal.quantity,
+                                        'price': proposal.price,
+                                        'metadata': proposal.metadata
+                                    }
+                                    
+                                    # Enviar via Telegram com botões de aprovação
+                                    telegram_channel = None
+                                    for channel_name, channel in self.notifier.channels:
+                                        if channel_name == 'telegram' and hasattr(channel, 'send_proposal_with_approval'):
+                                            telegram_channel = channel
+                                            break
+                                    
+                                    if telegram_channel:
+                                        telegram_channel.send_proposal_with_approval(proposal_data)
+                                    else:
+                                        logger.warning("Canal Telegram não disponível")
+                                else:
+                                    logger.debug(f"Proposta {proposal.proposal_id} rejeitada: {reason}")
+                            except Exception as e:
+                                logger.error(f"Erro ao avaliar proposta {proposal.proposal_id}: {e}")
+                        
+                        logger.info(f"Propostas aprovadas e enviadas: {approved_count}")
             else:
                 opportunities = []
                 if successful_tickers == 0:

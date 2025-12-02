@@ -603,7 +603,8 @@ class TraderAgent:
                         'quantity': proposal.quantity,
                         'price': proposal.price,
                         'order_type': proposal.order_type,
-                        'metadata': proposal.metadata
+                        'metadata': proposal.metadata,
+                        'status': 'gerada'  # Status inicial: proposta gerada mas não aprovada pelo RiskAgent
                     }
                     self.orders_repo.save_proposal(proposal_dict)
                 except Exception as e:

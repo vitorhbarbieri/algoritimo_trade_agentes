@@ -621,4 +621,64 @@ class OrdersRepository:
             'total_modified': len(evaluations[evaluations['decision'] == 'MODIFY']) if not evaluations.empty else 0,
             'total_pnl': executions['total_cost'].sum() if not executions.empty and 'total_cost' in executions.columns else 0
         }
+    
+    def update_proposal_status(self, proposal_id: str, status: str) -> bool:
+        """Atualiza o status de uma proposta.
+        
+        Args:
+            proposal_id: ID da proposta
+            status: Novo status ('gerada', 'enviada', 'aprovada', 'cancelada')
+        """
+        try:
+            if status not in ['gerada', 'enviada', 'aprovada', 'cancelada']:
+                logger.error(f"Status inválido: {status}")
+                return False
+            
+            updated_at = get_b3_timestamp()
+            
+            with _connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE proposals 
+                    SET status = ?, status_updated_at = ?
+                    WHERE proposal_id = ?
+                """, (status, updated_at, proposal_id))
+                
+                if cursor.rowcount > 0:
+                    logger.info(f"Status da proposta {proposal_id} atualizado para '{status}'")
+                    return True
+                else:
+                    logger.warning(f"Proposta {proposal_id} não encontrada para atualização")
+                    return False
+        except Exception as e:
+            logger.error(f"Erro ao atualizar status da proposta {proposal_id}: {e}")
+            return False
+    
+    def get_proposals_by_status(self, status: str = None) -> pd.DataFrame:
+        """Busca propostas filtradas por status.
+        
+        Args:
+            status: Status para filtrar ('gerada', 'enviada', 'aprovada', 'cancelada')
+                   Se None, retorna todas
+        """
+        try:
+            with _connect() as conn:
+                query = "SELECT * FROM proposals WHERE 1=1"
+                params = []
+                
+                if status:
+                    query += " AND status = ?"
+                    params.append(status)
+                
+                query += " ORDER BY created_at DESC"
+                
+                df = pd.read_sql_query(query, conn, params=params)
+                
+                if 'metadata' in df.columns:
+                    df['metadata'] = df['metadata'].apply(lambda x: json.loads(x) if x else {})
+                
+                return df
+        except Exception as e:
+            logger.error(f"Erro ao buscar propostas por status: {e}")
+            return pd.DataFrame()
 

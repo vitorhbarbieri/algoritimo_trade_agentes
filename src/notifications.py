@@ -253,8 +253,10 @@ class TelegramNotifier(NotificationChannel):
             
             message += f"""
 *✅ APROVAÇÃO:*
-Para aprovar: Responda SIM ou digite `/aprovar {proposal_id}`
-Para cancelar: Responda NAO ou digite `/cancelar {proposal_id}`
+Para aprovar: Digite `/aprovar {proposal_id}`
+Para cancelar: Digite `/cancelar {proposal_id}`
+
+*ID da Proposta:* `{proposal_id}`
 """
             
             message += f"\n_Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}_"

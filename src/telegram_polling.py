@@ -202,8 +202,24 @@ class TelegramPolling:
                 datetime.now().isoformat(),
                 chat_id
             ))
+            
+            # Atualizar status da proposta para 'aprovada'
+            try:
+                from src.orders_repository import OrdersRepository
+                repo = OrdersRepository()
+                repo.update_proposal_status(proposal_id, 'aprovada')
+            except Exception as e:
+                logger.error(f"Erro ao atualizar status da proposta: {e}")
             conn.commit()
             conn.close()
+            
+            # Atualizar status da proposta para 'aprovada'
+            try:
+                from src.orders_repository import OrdersRepository
+                repo = OrdersRepository()
+                repo.update_proposal_status(proposal_id, 'aprovada')
+            except Exception as e:
+                logger.error(f"Erro ao atualizar status da proposta: {e}")
             
             # Enviar confirmação
             self.send_message(
@@ -259,8 +275,24 @@ class TelegramPolling:
                 datetime.now().isoformat(),
                 chat_id
             ))
+            
+            # Atualizar status da proposta para 'cancelada'
+            try:
+                from src.orders_repository import OrdersRepository
+                repo = OrdersRepository()
+                repo.update_proposal_status(proposal_id, 'cancelada')
+            except Exception as e:
+                logger.error(f"Erro ao atualizar status da proposta: {e}")
             conn.commit()
             conn.close()
+            
+            # Atualizar status da proposta para 'cancelada'
+            try:
+                from src.orders_repository import OrdersRepository
+                repo = OrdersRepository()
+                repo.update_proposal_status(proposal_id, 'cancelada')
+            except Exception as e:
+                logger.error(f"Erro ao atualizar status da proposta: {e}")
             
             # Enviar confirmação
             self.send_message(
