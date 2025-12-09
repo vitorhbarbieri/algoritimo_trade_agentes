@@ -151,14 +151,29 @@ class TelegramPolling:
     
     def _extract_proposal_id(self, text: str) -> Optional[str]:
         """Extrai proposal_id do texto da mensagem."""
-        # Procurar por padrão: *Proposta ID:* `PROPOSAL_ID`
         import re
-        match = re.search(r'Proposta ID[:\*]*\s*`?([A-Z0-9\-_]+)`?', text, re.IGNORECASE)
+        # Procurar por padrão: *ID:* `1234` ou apenas 4 dígitos
+        match = re.search(r'ID[:\*]*\s*`?(\d{4})`?', text, re.IGNORECASE)
         if match:
             return match.group(1)
         
-        # Procurar por padrão: DAYOPT-...
-        match = re.search(r'(DAYOPT-[A-Z0-9\.]+-[0-9\.]+-[0-9]+)', text)
+        # Procurar por padrão: /aprovar 1234 ou /cancelar 1234
+        match = re.search(r'/(aprovar|cancelar)\s+(\d{4})', text, re.IGNORECASE)
+        if match:
+            return match.group(2)
+        
+        # Procurar por padrão: apenas 4 dígitos isolados (último recurso)
+        match = re.search(r'\b(\d{4})\b', text)
+        if match:
+            return match.group(1)
+        
+        # Compatibilidade com formato antigo: DT-ATIVO-1234 ou FUT-SYMBOL-1234
+        match = re.search(r'(?:DT|FUT)-[A-Z0-9]+-(\d{4})', text)
+        if match:
+            return match.group(1)
+        
+        # Compatibilidade com formato muito antigo: DAYOPT-...
+        match = re.search(r'DAYOPT-[A-Z0-9\.]+-[0-9\.]+-(\d{4})', text)
         if match:
             return match.group(1)
         

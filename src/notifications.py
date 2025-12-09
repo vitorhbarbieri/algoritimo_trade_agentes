@@ -28,10 +28,11 @@ class NotificationChannel:
 class TelegramNotifier(NotificationChannel):
     """Notificador via Telegram Bot."""
     
-    def __init__(self, bot_token: str = None, chat_id: str = None):
+    def __init__(self, bot_token: str = None, chat_id: str = None, orders_repo=None):
         self.bot_token = bot_token or os.getenv('TELEGRAM_BOT_TOKEN', '')
         self.chat_id = chat_id or os.getenv('TELEGRAM_CHAT_ID', '')
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.orders_repo = orders_repo  # Para salvar mensagens quando usado diretamente
     
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.chat_id)
@@ -189,17 +190,20 @@ class TelegramNotifier(NotificationChannel):
             comparison_score = metadata.get('comparison_score', 0)
             
             # Formatar mensagem rica e detalhada
+            # ID destacado no topo para fácil identificação
             message = f"""
-*📊 NOVA PROPOSTA DE ORDEM - DAYTRADE*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+*📊 NOVA PROPOSTA - DAYTRADE*
+*ID: {proposal_id}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-*Proposta ID:* `{proposal_id}`
 *Tipo:* {instrument_label}
 *Ativo:* `{symbol}`
 *Ativo Base:* {underlying}
 *Operação:* {side}
 *Quantidade:* {quantity:.0f} {'contratos' if instrument_type == 'options' else 'ações'}
 
-*⭐ SCORE DE PRIORIZAÇÃO:* {comparison_score:.2f}
+*⭐ SCORE:* {comparison_score:.2f}
 
 *💵 VALOR DA OPERAÇÃO:*
 • Ticket Padronizado: R$ {ticket_value:,.2f}
@@ -251,12 +255,16 @@ class TelegramNotifier(NotificationChannel):
                 else:
                     message += f"• Escolhida: Ação (melhor que opção)\n"
             
+            # ID simplificado destacado no início para fácil copy/paste
             message += f"""
-*✅ APROVAÇÃO:*
-Para aprovar: Digite `/aprovar {proposal_id}`
-Para cancelar: Digite `/cancelar {proposal_id}`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+*✅ APROVAÇÃO RÁPIDA:*
 
-*ID da Proposta:* `{proposal_id}`
+`/aprovar {proposal_id}`  ← Copie e cole
+`/cancelar {proposal_id}`  ← Copie e cole
+
+*ID:* `{proposal_id}`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
             
             message += f"\n_Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}_"
@@ -285,13 +293,60 @@ Para cancelar: Digite `/cancelar {proposal_id}`
             
             if response.status_code == 200:
                 logger.info(f"Proposta enviada com botões: {proposal_id}")
+                
+                # Salvar mensagem enviada (se orders_repo disponível)
+                if hasattr(self, 'orders_repo') and self.orders_repo:
+                    try:
+                        self.orders_repo.save_telegram_message(
+                            message_text=message,
+                            message_type='proposal',
+                            title="Nova Proposta - Daytrade",
+                            priority='high',
+                            proposal_id=proposal_id,
+                            success=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"Erro ao salvar mensagem de proposta: {e}")
+                
                 return True
             else:
                 logger.error(f"Erro ao enviar proposta: {response.status_code} - {response.text}")
+                
+                # Salvar falha
+                if hasattr(self, 'orders_repo') and self.orders_repo:
+                    try:
+                        self.orders_repo.save_telegram_message(
+                            message_text=message,
+                            message_type='proposal',
+                            title="Nova Proposta - Daytrade",
+                            priority='high',
+                            proposal_id=proposal_id,
+                            success=False,
+                            error_message=f"{response.status_code} - {response.text}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Erro ao salvar falha de proposta: {e}")
+                
                 return False
                 
         except Exception as e:
             logger.error(f"Erro ao enviar proposta com aprovação: {e}")
+            
+            # Salvar erro
+            if hasattr(self, 'orders_repo') and self.orders_repo:
+                try:
+                    self.orders_repo.save_telegram_message(
+                        message_text=str(proposal),
+                        message_type='proposal',
+                        title="Nova Proposta - Daytrade",
+                        priority='high',
+                        proposal_id=proposal.get('proposal_id', 'UNKNOWN'),
+                        success=False,
+                        error_message=str(e)
+                    )
+                except:
+                    pass
+            
             return False
     
     def answer_callback_query(self, callback_query_id: str, text: str = None, show_alert: bool = False) -> bool:
@@ -439,9 +494,10 @@ class DiscordNotifier(NotificationChannel):
 class UnifiedNotifier:
     """Notificador unificado que usa múltiplos canais."""
     
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, orders_repo=None):
         self.config = config
         self.channels = []
+        self.orders_repo = orders_repo  # Para salvar mensagens enviadas
         
         # Telegram
         telegram_enabled = config.get('notifications', {}).get('telegram', {}).get('enabled', False)
@@ -449,7 +505,8 @@ class UnifiedNotifier:
             telegram_config = config.get('notifications', {}).get('telegram', {})
             telegram = TelegramNotifier(
                 bot_token=telegram_config.get('bot_token') or os.getenv('TELEGRAM_BOT_TOKEN', ''),
-                chat_id=telegram_config.get('chat_id') or os.getenv('TELEGRAM_CHAT_ID', '')
+                chat_id=telegram_config.get('chat_id') or os.getenv('TELEGRAM_CHAT_ID', ''),
+                orders_repo=orders_repo  # Passar orders_repo para TelegramNotifier também
             )
             if telegram.is_configured():
                 self.channels.append(('telegram', telegram))
@@ -487,19 +544,66 @@ class UnifiedNotifier:
         if not self.channels:
             logger.warning("⚠️ Nenhum canal de notificação configurado!")
     
-    def send(self, message: str, title: str = None, priority: str = 'normal') -> bool:
-        """Envia notificação em todos os canais configurados."""
+    def send(self, message: str, title: str = None, priority: str = 'normal', 
+             message_type: str = 'other', proposal_id: str = None) -> bool:
+        """Envia notificação em todos os canais configurados e salva para rastreabilidade."""
         if not self.channels:
             return False
         
         results = []
+        success = False
+        error_msg = None
+        
         for channel_name, channel in self.channels:
             try:
                 result = channel.send(message, title, priority)
                 results.append(result)
+                if result:
+                    success = True
             except Exception as e:
                 logger.error(f"Erro ao enviar via {channel_name}: {e}")
                 results.append(False)
+                if not error_msg:
+                    error_msg = str(e)
+        
+        # Salvar mensagem enviada para rastreabilidade
+        if self.orders_repo:
+            try:
+                # Determinar tipo de mensagem automaticamente se não especificado
+                if message_type == 'other':
+                    if title:
+                        title_lower = title.lower()
+                        if 'status' in title_lower or 'atualização' in title_lower:
+                            message_type = 'status'
+                        elif 'proposta' in title_lower or 'proposal' in title_lower:
+                            message_type = 'proposal'
+                        elif 'oportunidade' in title_lower or 'opportunity' in title_lower:
+                            message_type = 'opportunity'
+                        elif 'erro' in title_lower or 'error' in title_lower:
+                            message_type = 'error'
+                        elif 'kill switch' in title_lower:
+                            message_type = 'kill_switch'
+                        elif 'mercado aberto' in title_lower or 'market open' in title_lower:
+                            message_type = 'market_open'
+                        elif 'mercado fechado' in title_lower or 'market close' in title_lower:
+                            message_type = 'market_close'
+                        elif 'eod' in title_lower or 'fechamento' in title_lower:
+                            message_type = 'eod'
+                        elif 'saúde' in title_lower or 'health' in title_lower or 'captura' in title_lower:
+                            message_type = 'health'
+                
+                self.orders_repo.save_telegram_message(
+                    message_text=message,
+                    message_type=message_type,
+                    title=title,
+                    priority=priority,
+                    proposal_id=proposal_id,
+                    success=success,
+                    error_message=error_msg if not success else None,
+                    channel='telegram' if 'telegram' in [c[0] for c in self.channels] else 'other'
+                )
+            except Exception as e:
+                logger.warning(f"Erro ao salvar mensagem Telegram: {e}")
         
         return any(results)
     
@@ -538,29 +642,73 @@ class UnifiedNotifier:
     
     def notify_error(self, error_type: str, error_message: str, details: Dict = None):
         """Notifica erro."""
+        success = False
         for channel_name, channel in self.channels:
             try:
                 if hasattr(channel, 'send_error'):
-                    channel.send_error(error_type, error_message)
+                    result = channel.send_error(error_type, error_message)
+                    if result:
+                        success = True
                 elif hasattr(channel, 'notify_error'):
-                    channel.notify_error(error_type, error_message, details)
+                    result = channel.notify_error(error_type, error_message, details)
+                    if result:
+                        success = True
                 else:
                     message = f"Erro: {error_type}\n{error_message}"
-                    channel.send(message, title="Erro no Sistema", priority='critical')
+                    result = channel.send(message, title="Erro no Sistema", priority='critical')
+                    if result:
+                        success = True
             except Exception as e:
                 logger.error(f"Erro ao notificar erro via {channel_name}: {e}")
+        
+        # Salvar mensagem de erro
+        if self.orders_repo:
+            try:
+                message_text = f"Erro: {error_type}\n{error_message}"
+                if details:
+                    message_text += f"\nDetalhes: {json.dumps(details)}"
+                self.orders_repo.save_telegram_message(
+                    message_text=message_text,
+                    message_type='error',
+                    title="Erro no Sistema",
+                    priority='critical',
+                    success=success
+                )
+            except Exception as e:
+                logger.warning(f"Erro ao salvar mensagem de erro: {e}")
     
     def notify_kill_switch(self, reason: str, nav_loss: float):
         """Notifica kill switch."""
+        success = False
         for channel_name, channel in self.channels:
             try:
                 if hasattr(channel, 'send_kill_switch'):
-                    channel.send_kill_switch(reason, nav_loss)
+                    result = channel.send_kill_switch(reason, nav_loss)
+                    if result:
+                        success = True
                 elif hasattr(channel, 'notify_kill_switch'):
-                    channel.notify_kill_switch(reason, nav_loss)
+                    result = channel.notify_kill_switch(reason, nav_loss)
+                    if result:
+                        success = True
                 else:
                     message = f"KILL SWITCH ATIVADO!\nMotivo: {reason}\nPerda: {nav_loss:.2%}"
-                    channel.send(message, title="KILL SWITCH", priority='critical')
+                    result = channel.send(message, title="KILL SWITCH", priority='critical')
+                    if result:
+                        success = True
             except Exception as e:
                 logger.error(f"Erro ao notificar kill switch via {channel_name}: {e}")
+        
+        # Salvar mensagem de kill switch
+        if self.orders_repo:
+            try:
+                message_text = f"KILL SWITCH ATIVADO!\nMotivo: {reason}\nPerda: {nav_loss:.2%}"
+                self.orders_repo.save_telegram_message(
+                    message_text=message_text,
+                    message_type='kill_switch',
+                    title="KILL SWITCH",
+                    priority='critical',
+                    success=success
+                )
+            except Exception as e:
+                logger.warning(f"Erro ao salvar mensagem de kill switch: {e}")
 

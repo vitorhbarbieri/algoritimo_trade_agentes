@@ -83,3 +83,4 @@ def testar_status():
 if __name__ == '__main__':
     testar_status()
 
+

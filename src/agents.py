@@ -129,14 +129,13 @@ class DayTradeOptionsStrategy:
                 logging.warning("DayTradeOptionsStrategy: Nenhum dado spot disponível")
             return proposals
         
-        # Se não houver opções, tentar buscar para cada ativo com momentum
+        # Se não houver opções, continuar para gerar propostas spot
         if not options_data:
             if self.logger:
                 import logging
-                logging.warning("DayTradeOptionsStrategy: Nenhum dado de opções disponível")
-            # Continuar mesmo sem opções - pode gerar propostas baseadas apenas em momentum
-            # Mas não vamos gerar propostas sem opções
-            return proposals
+                logging.info("DayTradeOptionsStrategy: Nenhum dado de opções disponível - gerando propostas spot")
+            # Continuar para gerar propostas baseadas em momentum spot
+            # A estratégia pode gerar propostas spot quando enable_spot=True
         
         # Iterar sobre ativos disponíveis
         for asset, spot_info in spot_data.items():
@@ -379,18 +378,43 @@ class DayTradeOptionsStrategy:
                     logging.error(f"Erro em DayTradeOptionsStrategy para {asset}: {str(e)}")
                 continue
         
-        # Ordenar propostas por score (priorização)
+        # Aplicar filtro de horário (priorizar 12:00-15:00)
+        # Baseado em análise: 53.4% dos sucessos ocorrem neste horário
+        current_hour = timestamp.hour if hasattr(timestamp, 'hour') else pd.Timestamp.now().hour
+        
+        def calcular_score_com_horario(prop):
+            """Calcula score ajustado pelo horário."""
+            base_score = prop.metadata.get('comparison_score', 0)
+            
+            # Multiplicador baseado no horário
+            if 12 <= current_hour <= 15:
+                # Horário ideal: multiplicador 1.2x (prioriza)
+                horario_multiplier = 1.2
+            elif 10 <= current_hour < 12 or 15 < current_hour <= 16:
+                # Horário bom: multiplicador 1.0x (normal)
+                horario_multiplier = 1.0
+            else:
+                # Horário não ideal: multiplicador 0.7x (reduz prioridade)
+                horario_multiplier = 0.7
+            
+            return base_score * horario_multiplier
+        
+        # Ordenar propostas por score ajustado (priorização)
         proposals_with_scores = []
         for prop in proposals:
-            score = prop.metadata.get('comparison_score', 0)
-            proposals_with_scores.append((score, prop))
+            adjusted_score = calcular_score_com_horario(prop)
+            proposals_with_scores.append((adjusted_score, prop))
         
-        # Ordenar por score (maior primeiro)
+        # Ordenar por score ajustado (maior primeiro)
         proposals_with_scores.sort(key=lambda x: x[0], reverse=True)
         
-        # Filtrar por score mínimo se configurado
+        # Filtrar por score mínimo se configurado (usar score original, não ajustado)
         min_score = cfg.get('min_comparison_score', 0)
-        filtered_proposals = [prop for score, prop in proposals_with_scores if score >= min_score]
+        filtered_proposals = []
+        for adjusted_score, prop in proposals_with_scores:
+            original_score = prop.metadata.get('comparison_score', 0)
+            if original_score >= min_score:
+                filtered_proposals.append(prop)
         
         # Retornar apenas as melhores oportunidades (top 10)
         return filtered_proposals[:10]
@@ -417,7 +441,10 @@ class DayTradeOptionsStrategy:
                 qty = int(STANDARD_TICKET_VALUE / premium_per_contract) + 1
                 actual_value = qty * premium_per_contract
             
-            proposal_id = f"DAYOPT-{asset}-{best_call['strike']}-{best_call['expiry'].strftime('%Y%m%d')}-{int(timestamp.timestamp())}"
+            # ID simplificado: apenas últimos 4 dígitos do timestamp
+            # Exemplo: 3456 (últimos 4 dígitos do timestamp Unix)
+            timestamp_short = str(int(timestamp.timestamp()))[-4:]
+            proposal_id = timestamp_short
             
             entry_price_unit = best_call['ask']
             entry_price_total = entry_price_unit * qty * 100
@@ -496,7 +523,9 @@ class DayTradeOptionsStrategy:
             
             actual_value = qty * last_price
             
-            proposal_id = f"DAYSPOT-{asset}-{int(timestamp.timestamp())}"
+            # ID simplificado: apenas últimos 4 dígitos do timestamp
+            timestamp_short = str(int(timestamp.timestamp()))[-4:]
+            proposal_id = timestamp_short
             
             entry_price = last_price
             entry_price_total = actual_value
@@ -565,8 +594,35 @@ class TraderAgent:
             self.strategies.append(DayTradeOptionsStrategy(config, logger))
     
     def generate_proposals(self, date: pd.Timestamp, market_data: Dict) -> List[OrderProposal]:
-        """Gera propostas de trading."""
+        """
+        Gera propostas de daytrade focadas exclusivamente em ativos brasileiros (B3).
+        Filtra automaticamente apenas tickers com sufixo .SA
+        """
         proposals = []
+        
+        # FILTRO CRÍTICO: Processar APENAS ativos brasileiros (.SA)
+        # Filtrar market_data para garantir que apenas dados brasileiros sejam processados
+        if 'spot' in market_data:
+            market_data['spot'] = {
+                k: v for k, v in market_data['spot'].items() 
+                if '.SA' in str(k) or k.endswith('.SA')
+            }
+        
+        if 'options' in market_data:
+            # Filtrar opções apenas de ativos brasileiros
+            if isinstance(market_data['options'], dict):
+                market_data['options'] = {
+                    k: v for k, v in market_data['options'].items()
+                    if '.SA' in str(k) or k.endswith('.SA')
+                }
+            elif isinstance(market_data['options'], list):
+                market_data['options'] = [
+                    opt for opt in market_data['options']
+                    if isinstance(opt, dict) and (
+                        '.SA' in str(opt.get('underlying', '')) or 
+                        opt.get('underlying', '').endswith('.SA')
+                    )
+                ]
         
         # Executar estratégias modulares
         nav = self.config.get('nav', 1000000)
@@ -618,7 +674,11 @@ class TraderAgent:
         """Delta-hedged Volatility Arbitrage."""
         proposals = []
         threshold = self.config.get('vol_arb_threshold', 0.05)
-        underlying = self.config.get('vol_arb_underlying', 'AAPL')
+        underlying = self.config.get('vol_arb_underlying', 'PETR4.SA')
+        
+        # FILTRO: Apenas ativos brasileiros
+        if not ('.SA' in str(underlying) or underlying.endswith('.SA')):
+            return proposals
         
         if 'options' not in market_data or underlying not in market_data.get('spot', {}):
             return proposals
@@ -706,8 +766,13 @@ class TraderAgent:
     def _pairs_strategy(self, date: pd.Timestamp, market_data: Dict) -> List[OrderProposal]:
         """Pairs/Statistical Arbitrage."""
         proposals = []
-        ticker1 = self.config.get('pairs_ticker1', 'AAPL')
-        ticker2 = self.config.get('pairs_ticker2', 'MSFT')
+        ticker1 = self.config.get('pairs_ticker1', 'PETR4.SA')
+        ticker2 = self.config.get('pairs_ticker2', 'VALE3.SA')
+        
+        # FILTRO: Apenas ativos brasileiros
+        if not (('.SA' in str(ticker1) or ticker1.endswith('.SA')) and 
+                ('.SA' in str(ticker2) or ticker2.endswith('.SA'))):
+            return proposals
         zscore_threshold = self.config.get('pairs_zscore_threshold', 2.0)
         
         if ticker1 not in market_data.get('spot', {}) or ticker2 not in market_data.get('spot', {}):
@@ -815,20 +880,29 @@ class RiskAgent:
         if self.orders_repo:
             try:
                 from datetime import datetime
+                import pytz
+                # Usar timezone B3 para timestamp
+                b3_tz = pytz.timezone('America/Sao_Paulo')
+                timestamp = datetime.now(b3_tz).isoformat()
+                
                 evaluation_dict = {
                     'proposal_id': proposal.proposal_id,
-                    'timestamp': self.trading_schedule.get_current_b3_time().isoformat() if hasattr(self, 'trading_schedule') else datetime.now(pytz.timezone('America/Sao_Paulo')).isoformat(),
+                    'timestamp': timestamp,
                     'decision': decision,
                     'reason': reason,
                     'details': {},
                     'modified_quantity': modified_proposal.quantity if modified_proposal else None,
                     'modified_price': modified_proposal.price if modified_proposal else None
                 }
-                self.orders_repo.save_risk_evaluation(evaluation_dict)
-            except Exception as e:
-                if self.logger:
+                success = self.orders_repo.save_risk_evaluation(evaluation_dict)
+                if not success:
                     import logging
-                    logging.error(f"Erro ao salvar avaliação {proposal.proposal_id}: {e}")
+                    logging.warning(f"Falha ao salvar avaliação {proposal.proposal_id}")
+            except Exception as e:
+                import logging
+                logging.error(f"Erro ao salvar avaliação {proposal.proposal_id}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
     
     def evaluate_proposal(self, proposal: OrderProposal, market_data: Dict) -> Tuple[str, Optional[OrderProposal], str]:
         """
@@ -837,9 +911,9 @@ class RiskAgent:
         decision: 'APPROVE', 'MODIFY', 'REJECT'
         """
         if self.kill_switch_active:
-            decision = ('REJECT', None, 'Kill switch ativo')
-            self._save_evaluation(proposal, 'REJECT', 'Kill switch ativo')
-            return decision
+            reason = 'Kill switch ativo'
+            self._save_evaluation(proposal, 'REJECT', reason)
+            return ('REJECT', None, reason)
         
         # Validações específicas para estratégia de daytrade de opções
         if proposal.strategy == 'daytrade_options':

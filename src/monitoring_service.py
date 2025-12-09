@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
 import pandas as pd
+import yfinance as yf
 
 try:
     from .market_monitor import MarketMonitor
@@ -45,7 +46,7 @@ class MonitoringService:
         self.trader_agent = TraderAgent(config, self.logger, orders_repo=self.orders_repo)
         self.risk_agent = RiskAgent(self.portfolio_manager, config, self.logger, orders_repo=self.orders_repo)
         self.data_loader = DataLoader()
-        self.notifier = UnifiedNotifier(config)  # Sistema unificado de notificações
+        self.notifier = UnifiedNotifier(config, orders_repo=self.orders_repo)  # Sistema unificado de notificações
         self.trading_schedule = TradingSchedule()  # Horário de funcionamento B3
         self.is_running = False
         self.thread = None
@@ -55,9 +56,20 @@ class MonitoringService:
         self.trading_started = False  # Flag para saber se já iniciou hoje
         self.last_status_notification = None  # Última notificação de status (2h)
         self.day_start_time = None  # Horário de início do dia
+        self.eod_close_executed = False  # Flag para evitar fechamento duplicado
+        self.last_eod_check = None  # Última verificação de EOD
         
         # APIs
         self.stock_api = create_market_data_api('yfinance')
+        
+        # API de Futuros
+        try:
+            from .futures_data_api import create_futures_api
+            self.futures_api = create_futures_api()
+        except ImportError:
+            from futures_data_api import create_futures_api
+            self.futures_api = create_futures_api()
+        
         if config.get('enable_crypto', False):
             try:
                 self.crypto_api = create_crypto_api(
@@ -119,10 +131,7 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                 telegram_channel = channel
                 break
         
-        if telegram_channel:
-            telegram_channel.send(message)
-        else:
-            self.notifier.send(message, title="🚀 Mercado Aberto", priority='high')
+        self.notifier.send(message, title="🚀 Mercado Aberto", priority='high', message_type='market_open')
         
         self.day_start_time = b3_time
     
@@ -187,12 +196,67 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                 telegram_channel = channel
                 break
         
-        if telegram_channel:
-            telegram_channel.send(message)
-        else:
-            self.notifier.send(message, title="🏁 Mercado Fechado", priority='normal')
+        self.notifier.send(message, title="🏁 Mercado Fechado", priority='normal', message_type='market_close')
         self.trading_started = False
         self.day_start_time = None
+    
+    def _send_eod_notification(self, closed_count: int = 0):
+        """Envia notificação de fechamento EOD e executa análise automática."""
+        b3_time = self.trading_schedule.get_current_b3_time()
+        date_str = b3_time.strftime('%Y-%m-%d')
+        
+        # Buscar estatísticas do dia
+        if self.orders_repo:
+            summary = self.orders_repo.get_daily_summary(date_str)
+        else:
+            summary = {}
+        
+        message = f"""
+🏁 *FECHAMENTO EOD - {b3_time.strftime('%d/%m/%Y')}*
+
+*Horário:* {b3_time.strftime('%H:%M:%S')} (B3)
+
+*Posições Fechadas:*
+• Total: {closed_count} posições
+
+*Resumo do Dia:*
+• Propostas geradas: {summary.get('total_proposals', 0)}
+• Aprovadas: {summary.get('total_approved', 0)}
+• Rejeitadas: {summary.get('total_rejected', 0)}
+• Execuções: {summary.get('total_executions', 0)}
+
+*Status:* Todas as posições de daytrade foram fechadas automaticamente.
+
+🔄 Executando análise automática pós-EOD...
+"""
+        
+        self.notifier.send(message, title="Fechamento EOD", priority='normal', message_type='eod')
+        
+        # Executar análise automática pós-EOD
+        try:
+            logger.info("🔍 Iniciando análise automática pós-EOD...")
+            from .eod_analysis import EODAnalyzer
+            
+            analyzer = EODAnalyzer(self.config)
+            analysis = analyzer.analyze_daily_proposals(date_str)
+            
+            # Formatar e enviar relatório por Telegram
+            report = analyzer.format_telegram_report(analysis)
+            
+            # Enviar relatório completo (pode ser longo, dividir se necessário)
+            self.notifier.send(report, title="📊 Análise EOD Completa", priority='normal')
+            
+            logger.info("✅ Análise EOD concluída e relatório enviado")
+        except Exception as eod_analysis_err:
+            logger.error(f"❌ ERRO ao executar análise EOD: {eod_analysis_err}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Enviar notificação de erro
+            self.notifier.send(
+                f"⚠️ Erro ao executar análise EOD automática: {str(eod_analysis_err)}",
+                title="Erro na Análise EOD",
+                priority='high'
+            )
     
     def _send_status_notification(self):
         """Envia notificação de status a cada 2 horas."""
@@ -239,9 +303,55 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
         for strategy, count in strategy_stats.items():
             message += f"• {strategy.replace('_', ' ').title()}: {count}\n"
         
+        # Adicionar informações de captura de dados
+        if self.orders_repo:
+            try:
+                # Buscar estatísticas de captura de dados do dia
+                captures_today = self.orders_repo.get_market_data_captures(
+                    start_date=f"{b3_time.strftime('%Y-%m-%d')} 00:00:00",
+                    end_date=b3_time.isoformat()
+                )
+                
+                if not captures_today.empty:
+                    total_captures = len(captures_today)
+                    unique_tickers = captures_today['ticker'].nunique() if 'ticker' in captures_today.columns else 0
+                    
+                    # Contar por tipo
+                    spot_count = len(captures_today[captures_today.get('data_type', '') == 'spot']) if 'data_type' in captures_today.columns else 0
+                    options_count = len(captures_today[captures_today.get('data_type', '') == 'options']) if 'data_type' in captures_today.columns else 0
+                    futures_count = len(captures_today[captures_today.get('data_type', '') == 'futures']) if 'data_type' in captures_today.columns else 0
+                    
+                    # Última captura
+                    if 'timestamp' in captures_today.columns:
+                        last_capture = captures_today['timestamp'].max()
+                        message += f"""
+*📊 CAPTURA DE DADOS DE MERCADO:*
+• Total de capturas hoje: {total_captures}
+• Ativos únicos: {unique_tickers}
+• Spot: {spot_count} | Opções: {options_count} | Futuros: {futures_count}
+• Última captura: {last_capture if pd.notna(last_capture) else 'N/A'}
+"""
+                    else:
+                        message += f"""
+*📊 CAPTURA DE DADOS DE MERCADO:*
+• Total de capturas hoje: {total_captures}
+• Ativos únicos: {unique_tickers}
+"""
+                else:
+                    message += f"""
+*📊 CAPTURA DE DADOS DE MERCADO:*
+• Nenhuma captura registrada hoje ainda
+"""
+            except Exception as e:
+                logger.warning(f"Erro ao buscar estatísticas de captura: {e}")
+                message += f"""
+*📊 CAPTURA DE DADOS DE MERCADO:*
+• Erro ao buscar estatísticas: {str(e)[:50]}
+"""
+        
         message += f"\n*Próxima atualização:* Em 2 horas"
         
-        self.notifier.send(message, title="📊 Status do Agente", priority='normal')
+        self.notifier.send(message, title="📊 Status do Agente", priority='normal', message_type='status')
         self.last_status_notification = b3_time
     
     def scan_market(self) -> Dict:
@@ -267,6 +377,19 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                 'proposals': 0
             }
         
+        # Validação: não permitir propostas após 15:00 (para garantir fechamento EOD)
+        current_hour = b3_time.hour
+        if current_hour >= 15:
+            logger.info(f"Horário limite atingido ({b3_time.strftime('%H:%M')}) - Não gerando novas propostas (fechamento EOD às 17:00)")
+            return {
+                'timestamp': b3_time.isoformat(),
+                'status': 'LIMIT_HOUR',
+                'message': 'Horário limite para novas propostas (15:00)',
+                'data_captured': 0,
+                'proposals': 0,
+                'opportunities': 0
+            }
+        
         # Verificar se está no horário de trading (inclui pré-mercado)
         trading_status = self.trading_schedule.get_trading_status()
         
@@ -288,7 +411,11 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
         
         try:
             # Buscar dados de ações (INTRADAY do dia atual)
-            tickers = self.config.get('monitored_tickers', [])
+            # Filtrar apenas tickers brasileiros (.SA)
+            all_tickers = self.config.get('monitored_tickers', [])
+            tickers = [t for t in all_tickers if '.SA' in str(t)]
+            
+            # Coleta de futuros será feita dentro do loop de dados
             if not tickers:
                 logger.warning("Nenhum ticker configurado para monitoramento")
                 return {
@@ -300,7 +427,31 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
             
             # Buscar dados INTRADAY do dia atual (não histórico!)
             today = datetime.now().strftime('%Y-%m-%d')
-            market_data = {'spot': {}, 'options': {}}
+            market_data = {'spot': {}, 'options': {}, 'futures': {}}
+            
+            # 1. COLETAR DADOS DE FUTUROS PRIMEIRO
+            futures = self.config.get('monitored_futures', [])
+            if futures and hasattr(self, 'futures_api'):
+                logger.info(f"Coletando dados de {len(futures)} contratos futuros...")
+                try:
+                    futures_data = self.futures_api.get_all_futures_data(futures)
+                    if futures_data:
+                        market_data['futures'] = futures_data
+                        logger.info(f"Dados coletados para {len(futures_data)} futuros: {list(futures_data.keys())}")
+                except Exception as e:
+                    logger.warning(f"Erro ao coletar dados de futuros: {e}")
+            
+            # 1. COLETAR DADOS DE FUTUROS
+            futures = self.config.get('monitored_futures', [])
+            if futures and hasattr(self, 'futures_api'):
+                logger.info(f"Coletando dados de {len(futures)} contratos futuros...")
+                try:
+                    futures_data = self.futures_api.get_all_futures_data(futures)
+                    if futures_data:
+                        market_data['futures'] = futures_data
+                        logger.info(f"Dados coletados para {len(futures_data)} futuros: {list(futures_data.keys())}")
+                except Exception as e:
+                    logger.warning(f"Erro ao coletar dados de futuros: {e}")
             
             logger.info(f"Buscando dados intraday para {len(tickers)} tickers...")
             
@@ -312,7 +463,8 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                 raise
             
             # Buscar dados spot INTRADAY para cada ticker
-            tickers_to_process = tickers[:30]  # Processar todos os tickers configurados
+            # Processar todos os tickers configurados (agora 62 ativos)
+            tickers_to_process = tickers  # Processar todos os tickers brasileiros
             successful_tickers = 0
             failed_tickers = []
             
@@ -492,14 +644,22 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                     
                     successful_tickers += 1
                     
-                    # Buscar opções para este ticker (apenas se tiver dados spot)
+                    # Buscar opções para este ticker (coletar para TODOS os 62 ativos)
+                    # Throttle para não sobrecarregar API (0.1s entre requisições)
                     try:
+                        import time
+                        time.sleep(0.1)  # Pequeno delay para não sobrecarregar API
+                        
                         options_df = self.stock_api.fetch_options_chain(ticker, today, today)
                         if not options_df.empty:
                             if ticker not in market_data['options']:
                                 market_data['options'][ticker] = []
-                            market_data['options'][ticker].extend(options_df.to_dict('records'))
-                            logger.debug(f"Opções encontradas para {ticker}: {len(options_df)}")
+                            # Converter DataFrame para lista de dicts
+                            options_list = options_df.to_dict('records')
+                            market_data['options'][ticker].extend(options_list)
+                            logger.debug(f"Opções encontradas para {ticker}: {len(options_list)} contratos")
+                        else:
+                            logger.debug(f"Nenhuma opção disponível para {ticker} (pode ser normal)")
                     except Exception as opt_err:
                         logger.debug(f"Erro ao buscar opções para {ticker}: {opt_err}")
                         # Continuar mesmo sem opções - pode ter propostas baseadas apenas em momentum
@@ -517,6 +677,8 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
             
             logger.info(f"Dados coletados: {successful_tickers}/{len(tickers_to_process)} tickers com dados spot")
             logger.info(f"Opções disponíveis para: {len(market_data.get('options', {}))} tickers")
+            if market_data.get('futures'):
+                logger.info(f"Futuros coletados: {len(market_data.get('futures', {}))} contratos")
             
             # CRÍTICO: Salvar dados capturados SEMPRE, mesmo quando mercado fechado
             # Isso garante rastreabilidade e análise posterior
@@ -539,28 +701,108 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                         import traceback
                         logger.debug(traceback.format_exc())
                 
+                # Salvar dados de futuros
+                if market_data.get('futures'):
+                    for future_symbol, future_data in market_data['futures'].items():
+                        try:
+                            self.orders_repo.save_market_data_capture(
+                                ticker=future_symbol,
+                                data_type='futures',
+                                spot_data=future_data,
+                                options_data=None,
+                                raw_data={'timestamp': b3_time.isoformat(), 'trading_status': trading_status},
+                                source='real'
+                            )
+                            saved_count += 1
+                        except Exception as save_err:
+                            logger.error(f"Erro ao salvar dados de futuro {future_symbol}: {save_err}")
+                
                 if saved_count > 0:
-                    logger.info(f"Dados salvos no banco: {saved_count} tickers")
+                    logger.info(f"Dados salvos no banco: {saved_count} instrumentos (spot + futuros)")
             
             # CRÍTICO: Gerar propostas APENAS durante horário de trading
             # Mas sempre capturamos dados para rastreabilidade
             proposals = []
-            if should_generate_proposals and market_data['spot']:
+            if should_generate_proposals:
                 # Gerar propostas do TraderAgent (inclui DayTradeOptionsStrategy)
-                proposals = self.trader_agent.generate_proposals(
-                    pd.to_datetime(datetime.now()),
-                    market_data
-                )
+                if market_data.get('spot'):
+                    proposals = self.trader_agent.generate_proposals(
+                        pd.to_datetime(datetime.now()),
+                        market_data
+                    )
                 
-                logger.info(f"Propostas geradas: {len(proposals)}")
+                # Gerar propostas de futuros se disponível
+                if market_data.get('futures'):
+                    try:
+                        from .futures_strategy import FuturesDayTradeStrategy
+                        futures_strategy = FuturesDayTradeStrategy(self.config)
+                        futures_proposals = futures_strategy.generate_proposals(
+                            pd.to_datetime(datetime.now()),
+                            market_data['futures']
+                        )
+                        proposals.extend(futures_proposals)
+                        if futures_proposals:
+                            logger.info(f"Propostas de futuros geradas: {len(futures_proposals)}")
+                    except ImportError:
+                        try:
+                            from futures_strategy import FuturesDayTradeStrategy
+                            futures_strategy = FuturesDayTradeStrategy(self.config)
+                            futures_proposals = futures_strategy.generate_proposals(
+                                pd.to_datetime(datetime.now()),
+                                market_data['futures']
+                            )
+                            proposals.extend(futures_proposals)
+                            if futures_proposals:
+                                logger.info(f"Propostas de futuros geradas: {len(futures_proposals)}")
+                        except Exception as e:
+                            logger.warning(f"Erro ao gerar propostas de futuros: {e}")
+                    except Exception as e:
+                        logger.warning(f"Erro ao gerar propostas de futuros: {e}")
+                
+                logger.info(f"Total de propostas geradas: {len(proposals)}")
                 
                 # Escanear oportunidades do MarketMonitor (para outras estratégias)
+                # FILTRO: Apenas oportunidades de ativos brasileiros
                 opportunities = self.market_monitor.scan_all_opportunities(market_data)
                 
-                # Enviar notificações se encontrar oportunidades
-                if opportunities:
-                    for opp in opportunities[:5]:
+                # Filtrar oportunidades apenas de ativos brasileiros
+                brazilian_opportunities = [
+                    opp for opp in opportunities 
+                    if '.SA' in str(opp.get('symbol', '')) or 
+                       '.SA' in str(opp.get('ticker', '')) or
+                       str(opp.get('symbol', '')).endswith('.SA') or
+                       str(opp.get('ticker', '')).endswith('.SA')
+                ]
+                
+                # Enviar notificações se encontrar oportunidades brasileiras
+                if brazilian_opportunities:
+                    for opp in brazilian_opportunities[:5]:
                         self.notifier.notify_opportunity(opp)
+                
+                # FILTRO CRÍTICO: Filtrar propostas apenas de ativos brasileiros
+                brazilian_proposals = []
+                for prop in proposals:
+                    symbol = prop.symbol if hasattr(prop, 'symbol') else str(prop.get('symbol', ''))
+                    underlying = prop.metadata.get('underlying', '') if hasattr(prop, 'metadata') and prop.metadata else ''
+                    
+                    # Verificar se é brasileiro
+                    is_brazilian = (
+                        '.SA' in str(symbol) or 
+                        str(symbol).endswith('.SA') or
+                        '.SA' in str(underlying) or
+                        str(underlying).endswith('.SA')
+                    )
+                    
+                    # Apenas estratégias de daytrade e futuros (que já são brasileiros)
+                    if prop.strategy in ['daytrade_options', 'futures_daytrade']:
+                        is_brazilian = True  # Essas estratégias já são apenas brasileiras
+                    
+                    if is_brazilian:
+                        brazilian_proposals.append(prop)
+                    else:
+                        logger.warning(f"Proposta filtrada (não brasileira): {symbol} - {prop.strategy}")
+                
+                proposals = brazilian_proposals
                 
                 # Avaliar propostas com RiskAgent antes de enviar
                 if proposals:
@@ -584,15 +826,25 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                         
                         logger.info(f"Propostas após filtro de razão ganho/perda: {len(propostas_filtradas)}")
                         
-                        # Avaliar com RiskAgent e enviar apenas as aprovadas
+                        # Avaliar TODAS as propostas com RiskAgent (não apenas as aprovadas)
+                        # IMPORTANTE: Avaliar todas para salvar avaliações no banco
                         approved_count = 0
-                        for proposal in propostas_filtradas[:10]:  # Limitar a 10 por scan
+                        rejected_count = 0
+                        modified_count = 0
+                        
+                        # Limitar a 50 propostas por scan para não sobrecarregar
+                        propostas_para_avaliar = propostas_filtradas[:50]
+                        
+                        logger.info(f"Avaliando {len(propostas_para_avaliar)} propostas com RiskAgent...")
+                        
+                        for proposal in propostas_para_avaliar:
                             try:
-                                # Avaliar proposta com RiskAgent
+                                # Avaliar proposta com RiskAgent (sempre salva avaliação)
                                 decision, modified_proposal, reason = self.risk_agent.evaluate_proposal(
                                     proposal, market_data
                                 )
                                 
+                                # Contar decisões
                                 if decision == 'APPROVE':
                                     approved_count += 1
                                     
@@ -623,10 +875,19 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                                         telegram_channel.send_proposal_with_approval(proposal_data)
                                     else:
                                         logger.warning("Canal Telegram não disponível")
-                                else:
+                                elif decision == 'REJECT':
+                                    rejected_count += 1
                                     logger.debug(f"Proposta {proposal.proposal_id} rejeitada: {reason}")
+                                elif decision == 'MODIFY':
+                                    modified_count += 1
+                                    logger.info(f"Proposta {proposal.proposal_id} modificada: {reason}")
+                                    
                             except Exception as e:
                                 logger.error(f"Erro ao avaliar proposta {proposal.proposal_id}: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                        
+                        logger.info(f"Resultado da avaliação: {approved_count} aprovadas, {rejected_count} rejeitadas, {modified_count} modificadas")
                         
                         logger.info(f"Propostas aprovadas e enviadas: {approved_count}")
             else:
@@ -695,6 +956,58 @@ O agente está agora monitorando o mercado e gerando propostas de daytrade.
                     # Apenas não geramos propostas quando fechado
                     
                     logger.info(f"[{b3_time.strftime('%H:%M:%S')}] Status: {status} - Executando scan...")
+                    
+                    # CRÍTICO: Fechamento EOD às 17:00
+                    current_hour = b3_time.hour
+                    current_minute = b3_time.minute
+                    current_date = b3_time.date()
+                    
+                    # Verificar se já passou das 17:00 e ainda não fechamos as posições hoje
+                    # Usar uma janela de tempo (17:00 até 18:00) para garantir execução
+                    if current_hour >= 17 and current_hour < 18:
+                        # Verificar se já fechamos hoje (comparar data)
+                        last_eod_date = self.last_eod_check.date() if self.last_eod_check else None
+                        
+                        if last_eod_date != current_date:
+                            logger.info(f"🔄 Executando fechamento EOD automático às {b3_time.strftime('%H:%M')}...")
+                            try:
+                                closed_count = self.orders_repo.close_all_daytrade_positions()
+                                if closed_count > 0:
+                                    logger.info(f"✅ Fechamento EOD: {closed_count} posições fechadas")
+                                    self._send_eod_notification(closed_count)
+                                else:
+                                    logger.info("ℹ️  Nenhuma posição aberta para fechar")
+                                    # Mesmo sem posições, executar análise se houver propostas
+                                    if self.orders_repo:
+                                        from datetime import datetime
+                                        date_str = b3_time.strftime('%Y-%m-%d')
+                                        proposals = self.orders_repo.get_proposals(
+                                            start_date=f'{date_str} 00:00:00',
+                                            end_date=f'{date_str} 23:59:59'
+                                        )
+                                        if not proposals.empty:
+                                            logger.info("🔄 Executando análise EOD mesmo sem posições abertas...")
+                                            try:
+                                                from .eod_analysis import EODAnalyzer
+                                                analyzer = EODAnalyzer(self.config)
+                                                analysis = analyzer.analyze_daily_proposals(date_str)
+                                                report = analyzer.format_telegram_report(analysis)
+                                                self.notifier.send(report, title="📊 Análise EOD Completa", priority='normal')
+                                            except Exception as e:
+                                                logger.error(f"Erro na análise EOD: {e}")
+                                
+                                self.eod_close_executed = True
+                                self.last_eod_check = b3_time
+                            except Exception as eod_err:
+                                logger.error(f"❌ ERRO ao fechar posições EOD: {eod_err}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                    
+                    # Resetar flag EOD após meia-noite (novo dia)
+                    if current_hour == 0 and current_minute < 5:
+                        if self.last_eod_check and (current_date > self.last_eod_check.date()):
+                            self.eod_close_executed = False
+                            logger.info("🔄 Flag EOD resetada para novo dia")
                     
                     # Escanear mercado (SEMPRE, mesmo fechado)
                     try:

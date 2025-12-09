@@ -108,3 +108,4 @@ Script de migração executado:
 **Data**: 01/12/2025
 **Status**: ✅ IMPLEMENTADO E FUNCIONANDO
 
+

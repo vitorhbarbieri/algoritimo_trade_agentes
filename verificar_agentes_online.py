@@ -172,3 +172,4 @@ def verificar_configuracao():
 if __name__ == '__main__':
     verificar_configuracao()
 
+

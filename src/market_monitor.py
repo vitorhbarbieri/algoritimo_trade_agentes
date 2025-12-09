@@ -241,18 +241,25 @@ class MarketMonitor:
         """Escaneia todas as oportunidades disponíveis."""
         all_opportunities = []
         
-        # Volatility Arbitrage
-        for ticker, data in market_data.get('spot', {}).items():
-            if ticker in market_data.get('options', {}):
+        # FILTRO CRÍTICO: Apenas ativos brasileiros (.SA)
+        spot_data = {k: v for k, v in market_data.get('spot', {}).items() 
+                     if '.SA' in str(k) or str(k).endswith('.SA')}
+        options_data = {}
+        if isinstance(market_data.get('options', {}), dict):
+            options_data = {k: v for k, v in market_data.get('options', {}).items()
+                           if '.SA' in str(k) or str(k).endswith('.SA')}
+        
+        # Volatility Arbitrage (apenas brasileiros)
+        for ticker, data in spot_data.items():
+            if ticker in options_data:
                 vol_arb = self.scan_volatility_arbitrage(
                     ticker,
                     data.get('close', 0),
-                    market_data['options'][ticker]
+                    options_data[ticker]
                 )
                 all_opportunities.extend(vol_arb)
         
-        # Pairs Trading
-        spot_data = market_data.get('spot', {})
+        # Pairs Trading (apenas brasileiros)
         tickers = list(spot_data.keys())
         for i in range(len(tickers)):
             for j in range(i+1, len(tickers)):

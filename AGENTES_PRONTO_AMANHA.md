@@ -137,3 +137,4 @@ python verificar_agentes_online.py
 
 **Boa sorte com a operação! 🚀**
 
+

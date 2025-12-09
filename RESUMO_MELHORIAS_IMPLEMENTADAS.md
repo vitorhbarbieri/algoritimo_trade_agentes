@@ -175,3 +175,4 @@ TraderAgent → Filtro Razão G/P → RiskAgent → Telegram (apenas aprovadas)
 **Data**: 01/12/2025
 **Status**: ✅ TODAS AS MELHORIAS IMPLEMENTADAS
 
+

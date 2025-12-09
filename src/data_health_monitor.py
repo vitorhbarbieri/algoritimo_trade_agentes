@@ -35,7 +35,18 @@ class DataHealthMonitor:
     def __init__(self, config: Dict):
         self.config = config
         self.db_path = Path('agents_orders.db')
-        self.notifier = UnifiedNotifier(config)
+        # Tentar obter orders_repo se disponível
+        orders_repo = None
+        try:
+            from .orders_repository import OrdersRepository
+            orders_repo = OrdersRepository()
+        except:
+            try:
+                from orders_repository import OrdersRepository
+                orders_repo = OrdersRepository()
+            except:
+                pass
+        self.notifier = UnifiedNotifier(config, orders_repo=orders_repo)
         self.trading_schedule = TradingSchedule()
         
         # Configurar API de mercado
@@ -386,18 +397,13 @@ class DataHealthMonitor:
                     telegram_channel = channel
                     break
             
-            if telegram_channel:
-                success = telegram_channel.send(
-                    report_message,
-                    title="Relatório de Captura de Dados",
-                    priority='high'
-                )
-                if success:
-                    logger.info(f"Relatório enviado com sucesso às {current_time_str}")
-                else:
-                    logger.warning(f"Falha ao enviar relatório às {current_time_str}")
-            else:
-                logger.warning("Canal Telegram não encontrado - relatório não enviado")
+            # Usar UnifiedNotifier para enviar e salvar automaticamente
+            self.notifier.send(
+                report_message,
+                title="Relatório de Captura de Dados",
+                priority='high',
+                message_type='health'
+            )
             
         except Exception as e:
             logger.error(f"Erro ao enviar relatório: {e}")

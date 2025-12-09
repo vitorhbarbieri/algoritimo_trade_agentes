@@ -20,6 +20,30 @@ def get_b3_timestamp() -> str:
     """Retorna timestamp atual no timezone de São Paulo (B3)."""
     return datetime.now(B3_TIMEZONE).isoformat()
 
+def _migrate_database():
+    """Migra banco de dados adicionando colunas se necessário."""
+    try:
+        with _connect() as conn:
+            cursor = conn.cursor()
+            
+            # Verificar se colunas existem
+            cursor.execute("PRAGMA table_info(open_positions)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            # Adicionar close_price se não existir
+            if 'close_price' not in columns:
+                conn.execute("ALTER TABLE open_positions ADD COLUMN close_price REAL")
+                logger.info("Coluna close_price adicionada à tabela open_positions")
+            
+            # Adicionar realized_pnl se não existir
+            if 'realized_pnl' not in columns:
+                conn.execute("ALTER TABLE open_positions ADD COLUMN realized_pnl REAL")
+                logger.info("Coluna realized_pnl adicionada à tabela open_positions")
+            
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Erro na migração do banco (pode ser normal se já migrado): {e}")
+
 logger = logging.getLogger(__name__)
 
 # Caminho do banco de dados
@@ -150,6 +174,8 @@ CREATE TABLE IF NOT EXISTS open_positions (
     opened_at TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     closed_at TEXT,
+    close_price REAL,
+    realized_pnl REAL,
     source TEXT NOT NULL DEFAULT 'real' CHECK (source IN ('simulation', 'real')),  -- Origem dos dados
     UNIQUE(symbol, side, opened_at)
 );
@@ -169,6 +195,24 @@ CREATE TABLE IF NOT EXISTS proposal_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_proposal_approvals_proposal_id ON proposal_approvals (proposal_id);
 CREATE INDEX IF NOT EXISTS idx_proposal_approvals_timestamp ON proposal_approvals (timestamp);
+
+-- Tabela para armazenar todas as mensagens enviadas via Telegram (rastreabilidade)
+CREATE TABLE IF NOT EXISTS telegram_messages_sent (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'telegram',
+    message_type TEXT NOT NULL CHECK (message_type IN ('status', 'proposal', 'opportunity', 'error', 'kill_switch', 'market_open', 'market_close', 'eod', 'health', 'other')),
+    title TEXT,
+    message_text TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('critical', 'high', 'normal', 'low')),
+    proposal_id TEXT,  -- Se relacionado a uma proposta
+    success INTEGER NOT NULL DEFAULT 1 CHECK (success IN (0, 1)),  -- 1 = enviado com sucesso, 0 = falhou
+    error_message TEXT,  -- Se falhou, guardar erro
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_timestamp ON telegram_messages_sent (timestamp);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_type ON telegram_messages_sent (message_type);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_proposal_id ON telegram_messages_sent (proposal_id);
 """
 
 
@@ -193,6 +237,7 @@ def init_db():
     with _connect() as conn:
         conn.executescript(SCHEMA_SQL)
     logger.info(f"Banco de dados inicializado: {DB_PATH}")
+    _migrate_database()
 
 
 class OrdersRepository:
@@ -592,6 +637,79 @@ class OrdersRepository:
             logger.error(f"Erro ao buscar posições abertas: {e}")
             return pd.DataFrame()
     
+    def close_position(self, position_id: int, close_price: float, realized_pnl: float = None) -> bool:
+        """Fecha uma posição aberta (EOD - End of Day)."""
+        try:
+            timestamp = get_b3_timestamp()
+            
+            with _connect() as conn:
+                # Buscar posição
+                cursor = conn.execute("""
+                    SELECT * FROM open_positions WHERE id = ? AND closed_at IS NULL
+                """, (position_id,))
+                
+                position = cursor.fetchone()
+                if not position:
+                    logger.warning(f"Posição {position_id} não encontrada ou já fechada")
+                    return False
+                
+                # Calcular PnL realizado se não fornecido
+                if realized_pnl is None:
+                    if position['side'] == 'BUY':
+                        realized_pnl = (close_price - position['avg_price']) * position['quantity']
+                    else:
+                        realized_pnl = (position['avg_price'] - close_price) * position['quantity']
+                
+                # Fechar posição
+                conn.execute("""
+                    UPDATE open_positions 
+                    SET closed_at = ?, close_price = ?, realized_pnl = ?
+                    WHERE id = ?
+                """, (timestamp, close_price, realized_pnl, position_id))
+                
+                conn.commit()
+                logger.info(f"Posição {position_id} fechada EOD: {position['symbol']} @ {close_price:.2f}, PnL: {realized_pnl:.2f}")
+                return True
+        except Exception as e:
+            logger.error(f"Erro ao fechar posição {position_id}: {e}")
+            return False
+    
+    def close_all_daytrade_positions(self, current_price_func=None) -> int:
+        """Fecha todas as posições abertas de daytrade (EOD)."""
+        try:
+            open_positions = self.get_open_positions()
+            if open_positions.empty:
+                logger.info("Nenhuma posição aberta para fechar")
+                return 0
+            
+            closed_count = 0
+            
+            for idx, position in open_positions.iterrows():
+                try:
+                    symbol = position['symbol']
+                    
+                    # Buscar preço atual se função fornecida
+                    if current_price_func:
+                        close_price = current_price_func(symbol)
+                    else:
+                        # Usar preço atual da posição como fallback
+                        close_price = position.get('current_price', position['avg_price'])
+                    
+                    if close_price and close_price > 0:
+                        if self.close_position(position['id'], close_price):
+                            closed_count += 1
+                    else:
+                        logger.warning(f"Não foi possível obter preço de fechamento para {symbol}")
+                except Exception as e:
+                    logger.error(f"Erro ao fechar posição {position.get('id', 'N/A')}: {e}")
+                    continue
+            
+            logger.info(f"Fechamento EOD: {closed_count} de {len(open_positions)} posições fechadas")
+            return closed_count
+        except Exception as e:
+            logger.error(f"Erro ao fechar todas as posições EOD: {e}")
+            return 0
+    
     def get_daily_summary(self, date: str = None) -> Dict:
         """Retorna resumo do dia."""
         if not date:
@@ -680,5 +798,85 @@ class OrdersRepository:
                 return df
         except Exception as e:
             logger.error(f"Erro ao buscar propostas por status: {e}")
+            return pd.DataFrame()
+    
+    def save_telegram_message(self, message_text: str, message_type: str = 'other', title: str = None, 
+                              priority: str = 'normal', proposal_id: str = None, success: bool = True, 
+                              error_message: str = None, channel: str = 'telegram'):
+        """Salva mensagem enviada via Telegram para rastreabilidade.
+        
+        Args:
+            message_text: Texto da mensagem enviada
+            message_type: Tipo da mensagem ('status', 'proposal', 'opportunity', 'error', 'kill_switch', 'market_open', 'market_close', 'eod', 'health', 'other')
+            title: Título da mensagem (opcional)
+            priority: Prioridade ('critical', 'high', 'normal', 'low')
+            proposal_id: ID da proposta relacionada (se aplicável)
+            success: Se a mensagem foi enviada com sucesso
+            error_message: Mensagem de erro (se falhou)
+            channel: Canal usado ('telegram', 'discord', etc.)
+        """
+        try:
+            timestamp = get_b3_timestamp()
+            
+            with _connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO telegram_messages_sent 
+                    (timestamp, channel, message_type, title, message_text, priority, proposal_id, success, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    timestamp,
+                    channel,
+                    message_type,
+                    title,
+                    message_text,
+                    priority,
+                    proposal_id,
+                    1 if success else 0,
+                    error_message
+                ))
+                conn.commit()
+                logger.debug(f"Mensagem Telegram salva: {message_type} - {title or 'Sem título'}")
+                return True
+        except Exception as e:
+            logger.error(f"Erro ao salvar mensagem Telegram: {e}")
+            return False
+    
+    def get_telegram_messages(self, start_date: str = None, end_date: str = None, 
+                              message_type: str = None, limit: int = None) -> pd.DataFrame:
+        """Busca mensagens Telegram enviadas.
+        
+        Args:
+            start_date: Data inicial (formato 'YYYY-MM-DD HH:MM:SS')
+            end_date: Data final (formato 'YYYY-MM-DD HH:MM:SS')
+            message_type: Filtrar por tipo de mensagem
+            limit: Limite de resultados
+        """
+        try:
+            with _connect() as conn:
+                query = "SELECT * FROM telegram_messages_sent WHERE 1=1"
+                params = []
+                
+                if start_date:
+                    query += " AND timestamp >= ?"
+                    params.append(start_date)
+                
+                if end_date:
+                    query += " AND timestamp <= ?"
+                    params.append(end_date)
+                
+                if message_type:
+                    query += " AND message_type = ?"
+                    params.append(message_type)
+                
+                query += " ORDER BY timestamp DESC"
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                df = pd.read_sql_query(query, conn, params=params)
+                return df
+        except Exception as e:
+            logger.error(f"Erro ao buscar mensagens Telegram: {e}")
             return pd.DataFrame()
 
